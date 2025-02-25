@@ -11,3 +11,7 @@ tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 tokio-stream = "0.1"
 bytes = "1.4"
 pbjson-types = "0.7.0"  
+uuid = "*"
+tracing = "*"
+tracing-subscriber = "*"
+serde_json = "*"

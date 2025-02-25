@@ -6,12 +6,7 @@ use chrono::Utc;
 use crate::producer::MessageProducer;
 use crate::models::Event;
 
-// Include the generated proto code
-pub mod dataservice {
-    tonic::include_proto!("dataservice");
-}
-
-use dataservice::{
+use crate::proto::{
     data_service_server::{DataService, DataServiceServer},
     DataRequest, DataResponse,
 };

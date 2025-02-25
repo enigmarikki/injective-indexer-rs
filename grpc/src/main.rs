@@ -4,7 +4,7 @@ use tokio::signal;
 use tonic::transport::Server;
 use tracing::{info, error};
 use tracing_subscriber::fmt::format::FmtSpan;
-
+mod proto;
 mod config;
 mod server;
 mod producer;
