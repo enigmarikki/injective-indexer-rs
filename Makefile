@@ -100,10 +100,10 @@ gen-proto:
 	  mkdir -p $$dir_path; \
 	  if [ "$$submod" = "tonic" ]; then \
 	    echo "Creating $$dir_path/tonic.rs to include $$base"; \
-	    echo "include!(concat!(env!(\"CARGO_MANIFEST_DIR\"), \"/grpc/src/proto/$$base\"));" > $$dir_path/tonic.rs; \
+	    echo "include!(concat!(env!(\"CARGO_MANIFEST_DIR\"), \"/src/proto/$$base\"));" > $$dir_path/tonic.rs; \
 	  else \
 	    echo "Creating $$dir_path/mod.rs to include $$base"; \
-	    echo "include!(concat!(env!(\"CARGO_MANIFEST_DIR\"), \"/grpc/src/proto/$$base\"));" > $$dir_path/mod.rs; \
+	    echo "include!(concat!(env!(\"CARGO_MANIFEST_DIR\"), \"/src/proto/$$base\"));" > $$dir_path/mod.rs; \
 	  fi; \
 	done
 
@@ -131,4 +131,4 @@ build:
 clean-all:
 	rm -rf cosmos-sdk ibc-go cometbft wasmd injective-core grpc/src/proto
 
-.PHONY: all gen gen-proto gen-submods fix-tonic-types build clean-all
+.PHONY: all gen gen-proto clean-proto gen-submods build clean-all
