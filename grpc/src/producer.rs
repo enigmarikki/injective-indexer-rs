@@ -27,13 +27,14 @@ impl KafkaProducer {
         })
     }
 
-    pub async fn send_message(&self, message: KafkaMessage) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    pub async fn send_message(
+        &self,
+        message: KafkaMessage,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let payload = serde_json::to_string(&message)?;
         let key = format!("{}-{}", message.block_height, message.block_time);
 
-        let record = FutureRecord::to(&self.topic)
-            .payload(&payload)
-            .key(&key);
+        let record = FutureRecord::to(&self.topic).payload(&payload).key(&key);
 
         self.producer
             .send(record, Timeout::After(self.timeout))
@@ -43,7 +44,10 @@ impl KafkaProducer {
         Ok(())
     }
 
-    pub async fn send_messages(&self, messages: Vec<KafkaMessage>) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    pub async fn send_messages(
+        &self,
+        messages: Vec<KafkaMessage>,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         for message in messages {
             self.send_message(message).await?;
         }
@@ -62,11 +66,16 @@ impl BatchKafkaProducer {
         let producer = ClientConfig::new()
             .set("bootstrap.servers", &config.brokers.join(","))
             .set("client.id", &config.client_id)
-            .set("message.timeout.ms", "30000")
-            .set("queue.buffering.max.messages", "100000")
-            .set("batch.size", "16384") // 16KB
-            .set("linger.ms", "5")      // 5ms batch collection time
-            .set("compression.type", "snappy")
+            // Throughput Optimizations
+            .set("compression.type", "snappy") // Efficient compression
+            .set("batch.size", "1048576") // 1MB batch size (increased from default)
+            .set("linger.ms", "5") // Wait up to 5ms to accumulate messages
+            .set("max.in.flight.requests.per.connection", "5") // Allow multiple parallel requests
+            .set("queue.buffering.max.messages", "100000") // Increase message queue
+            .set("queue.buffering.max.kbytes", "10240") // 10MB buffer
+            .set("message.send.max.retries", "3") // Retry failed sends
+            .set("retry.backoff.ms", "100") // Backoff between retries
+            .set("acks", "1") // Balanced between performance and reliability
             .create()?;
 
         Ok(BatchKafkaProducer {
@@ -74,10 +83,14 @@ impl BatchKafkaProducer {
             topic: config.topic.clone(),
         })
     }
-    
-    pub async fn send_batch(&self, messages: Vec<KafkaMessage>) -> Vec<Result<(), rdkafka::error::KafkaError>> {
+
+    pub async fn send_batch(
+        &self,
+        messages: Vec<KafkaMessage>,
+    ) -> Vec<Result<(), rdkafka::error::KafkaError>> {
         // Convert all messages to payload strings up front, keeping them alive for the whole function
-        let message_payloads: Vec<(String, String)> = messages.into_iter()
+        let message_payloads: Vec<(String, String)> = messages
+            .into_iter()
             .filter_map(|message| {
                 let key = format!("{}-{}", message.block_height, message.block_time);
                 match serde_json::to_string(&message) {
@@ -89,26 +102,24 @@ impl BatchKafkaProducer {
                 }
             })
             .collect();
-        
+
         // Create futures for each message
         let mut futures = Vec::with_capacity(message_payloads.len());
-        
+
         for (key, payload) in &message_payloads {
-            let record = FutureRecord::to(&self.topic)
-                .payload(payload)
-                .key(key);
-            
+            let record = FutureRecord::to(&self.topic).payload(payload).key(key);
+
             let future = self.producer.send(record, Timeout::Never);
             futures.push(future);
         }
-        
+
         // Wait for all futures to complete
         let mut results = Vec::with_capacity(futures.len());
         for future in futures {
             let result = future.await.map(|_| ()).map_err(|(err, _)| err);
             results.push(result);
         }
-        
+
         results
     }
 }

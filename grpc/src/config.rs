@@ -40,38 +40,40 @@ impl Default for Config {
 }
 
 impl Config {
-    pub fn from_file<P: AsRef<Path>>(path: P) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
+    pub fn from_file<P: AsRef<Path>>(
+        path: P,
+    ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
         let mut file = File::open(path)?;
         let mut contents = String::new();
         file.read_to_string(&mut contents)?;
-        
+
         let config: Config = serde_json::from_str(&contents)?;
         Ok(config)
     }
 
     pub fn from_env() -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
         let mut config = Config::default();
-        
+
         if let Ok(stream_endpoint) = env::var("GRPC_STREAM_ENDPOINT") {
             config.grpc.stream_endpoint = stream_endpoint;
         }
-        
+
         if let Ok(query_endpoint) = env::var("GRPC_QUERY_ENDPOINT") {
             config.grpc.query_endpoint = query_endpoint;
         }
-        
+
         if let Ok(brokers) = env::var("KAFKA_BROKERS") {
             config.kafka.brokers = brokers.split(',').map(|s| s.to_string()).collect();
         }
-        
+
         if let Ok(topic) = env::var("KAFKA_TOPIC") {
             config.kafka.topic = topic;
         }
-        
+
         if let Ok(client_id) = env::var("KAFKA_CLIENT_ID") {
             config.kafka.client_id = client_id;
         }
-        
+
         Ok(config)
     }
 }
