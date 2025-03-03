@@ -1,4 +1,3 @@
-// src/models/mod.rs - Data models for injective-consumer-base
 
 use serde::{Deserialize, Serialize};
 
