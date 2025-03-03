@@ -1,0 +1,23 @@
+[package]
+name = "injective-consumer"
+version = "0.1.0"
+edition = "2021"
+description = "Base library for Injective data consumers"
+license = "MIT"
+repository = "https://github.com/enigmarikki/injective-consumer"
+
+[dependencies]
+tokio = { version = "1.35", features = ["full"] }
+rdkafka = { version = "0.36", features = ["ssl", "cmake-build"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+log = "0.4"
+env_logger = "0.10"
+chrono = "0.4"
+futures = "0.3"
+thiserror = "1.0"
+async-trait = "0.1"
+
+[lib]
+name = "injective_consumer_base"
+path = "src/lib.rs"
