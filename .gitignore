@@ -1,2 +1,38 @@
 ./**/target
 ./**/*.lock
+*.bin
+# Rust build artifacts
+/target/
+
+# Cargo lock file (uncomment this line if developing a library)
+Cargo.lock
+
+# Backup files
+**/*.rs.bk
+
+# Debug files
+*.pdb
+
+# IDE and editor files
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+
+# Generated documentation
+/doc/
+
+# Environment variables
+.env
+.env.local
+
+# Log files
+*.log
+
+# Profiling data
+*.profraw
+flamegraph.svg
+
+# Build tool configs
+.cargo/config.local.toml
