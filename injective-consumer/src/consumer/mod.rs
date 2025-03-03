@@ -1,4 +1,3 @@
-// src/consumer/mod.rs - Kafka consumer for injective-consumer-base
 
 use crate::config::KafkaConfig;
 use crate::models::KafkaMessage;

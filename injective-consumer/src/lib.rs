@@ -3,7 +3,6 @@
 pub mod config;
 pub mod consumer;
 pub mod models;
-pub mod proto;
 
 // Re-export key components
 pub use config::Config;

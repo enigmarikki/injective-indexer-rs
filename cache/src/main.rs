@@ -1,6 +1,6 @@
 // src/main.rs - Main entry point for injective-consumer-redis
 
-use injective_consumer_base::{Config, KafkaConsumer};
+use injective_consumer::{Config, KafkaConsumer};
 use log::{error, info};
 use std::env;
 use std::error::Error;
