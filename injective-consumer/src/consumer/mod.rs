@@ -1,47 +1,48 @@
-use crate::config::KafkaConfig;
 use crate::models::KafkaMessage;
-use rdkafka::config::ClientConfig;
-use rdkafka::consumer::{Consumer, StreamConsumer};
-use rdkafka::message::Message;
-use futures::stream::StreamExt;
+use crate::config::KafkaConfig;
+use async_trait::async_trait;
+use rdkafka::{
+    consumer::{Consumer, StreamConsumer},
+    ClientConfig, Message,
+};
+use log::{error, info};
 use std::error::Error;
 use std::time::Duration;
-use log::{info, error};
 
-pub trait MessageProcessor {
+#[async_trait]
+pub trait MessageProcessor: Send + Sync {
     async fn process_message(&self, message: KafkaMessage) -> Result<(), Box<dyn Error + Send + Sync>>;
 }
 
-pub struct KafkaConsumer<T: MessageProcessor> {
+pub struct KafkaConsumer<P: MessageProcessor> {
     consumer: StreamConsumer,
-    processor: T,
+    processor: P,
 }
 
-impl<T: MessageProcessor> KafkaConsumer<T> {
-    pub fn new(config: &KafkaConfig, processor: T) -> Result<Self, rdkafka::error::KafkaError> {
+impl<P: MessageProcessor> KafkaConsumer<P> {
+    pub fn new(kafka_config: &KafkaConfig, processor: P) -> Result<Self, rdkafka::error::KafkaError> {
         let consumer: StreamConsumer = ClientConfig::new()
-            .set("bootstrap.servers", &config.brokers.join(","))
-            .set("group.id", "injective_data_processor")
+            .set("group.id", &kafka_config.consumer_group)
+            .set("bootstrap.servers", &kafka_config.brokers.join(","))
             .set("enable.auto.commit", "true")
             .set("auto.offset.reset", "earliest")
             .set("session.timeout.ms", "6000")
+            .set("max.poll.interval.ms", "300000") // 5 minutes
             .create()?;
-
-        consumer.subscribe(&[&config.topic])?;
-
+            
+        consumer.subscribe(&[&kafka_config.topic])?;
+        
         Ok(KafkaConsumer {
             consumer,
             processor,
         })
     }
-
+    
     pub async fn start(&self) -> Result<(), Box<dyn Error + Send + Sync>> {
-        info!("Starting Kafka consumer for topic: {}", self.consumer.subscription().unwrap_or_default().join(", "));
+        info!("Starting Kafka consumer for topic: {}", self.get_subscribed_topics().join(", "));
         
-        let mut message_stream = self.consumer.stream();
-        
-        while let Some(message_result) = message_stream.next().await {
-            match message_result {
+        loop {
+            match self.consumer.recv().await {
                 Ok(message) => {
                     match message.payload() {
                         Some(payload) => {
@@ -52,21 +53,28 @@ impl<T: MessageProcessor> KafkaConsumer<T> {
                                     }
                                 },
                                 Err(e) => {
-                                    error!("Error deserializing message: {}", e);
+                                    error!("Failed to deserialize message: {}", e);
                                 }
                             }
                         },
                         None => {
-                            error!("Received message with empty payload");
+                            error!("Received empty message");
                         }
                     }
                 },
                 Err(e) => {
                     error!("Error receiving message: {}", e);
+                    tokio::time::sleep(Duration::from_secs(1)).await;
                 }
             }
         }
-
-        Ok(())
+    }
+    
+    fn get_subscribed_topics(&self) -> Vec<String> {
+        self.consumer.subscription()
+            .unwrap_or_default()
+            .iter()
+            .map(|s| s.to_string())
+            .collect()
     }
 }

@@ -7,17 +7,16 @@ license = "MIT"
 repository = "https://github.com/enigmarikki/injective-consumer"
 
 [dependencies]
-tokio = { version = "1.35", features = ["full"] }
-rdkafka = { version = "0.36", features = ["ssl", "cmake-build"] }
+tokio = { version = "1", features = ["full"] }
+rdkafka = { version = "0.37.0", features = ["ssl", "sasl"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 log = "0.4"
-env_logger = "0.10"
-chrono = "0.4"
+env_logger = "0.11.6"
 futures = "0.3"
-thiserror = "1.0"
+redis = { version = "0.29.1", features = ["tokio-comp"] }
+scylla = "0.15.1"
+chrono = "0.4"
 async-trait = "0.1"
-
-[lib]
-name = "injective_consumer_base"
-path = "src/lib.rs"
+tonic = "0.12.3"
+prost = "0.13.5"

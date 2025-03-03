@@ -174,6 +174,7 @@ pub struct OraclePricePayload {
 }
 
 // Additional data models for the new message types
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DerivativeMarketPayload {
     pub market_id: String,
@@ -188,6 +189,14 @@ pub struct DerivativeMarketPayload {
     pub is_perpetual: bool,
     pub status: String,
     pub mark_price: String,
+    pub min_price_tick: String,
+    pub min_quantity_tick: String,
+    pub min_notional: String,
+    pub hfr: String,
+    pub hir: String,
+    pub funding_interval: String,
+    pub cumulative_funding: String,
+    pub cumulative_price : String
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

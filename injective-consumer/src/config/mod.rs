@@ -1,5 +1,3 @@
-// src/config/mod.rs - Configuration handling for injective-consumer-base
-
 use serde::{Deserialize, Serialize};
 use std::env;
 use std::fs::File;

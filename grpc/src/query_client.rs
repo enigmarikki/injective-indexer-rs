@@ -1,10 +1,9 @@
 use crate::config::GrpcConfig;
 use crate::proto::injective::exchange::v1beta1::query_client::QueryClient;
 use crate::proto::injective::exchange::v1beta1::{
-    DerivativeMarket, DerivativePosition, FullDerivativeMarket, QueryDerivativeMarketsRequest,
-    QueryDerivativeMarketsResponse, QueryExchangeBalancesRequest, QueryExchangeBalancesResponse,
-    QueryPositionsRequest, QueryPositionsResponse,
+    DerivativePosition, FullDerivativeMarket, QueryDerivativeMarketsRequest,QueryExchangeBalancesRequest, QueryPositionsRequest
 };
+use crate::proto::injective::exchange::v1beta1::full_derivative_market::Info;
 use log::{debug, error, info};
 use std::error::Error;
 use tokio::time::{interval, Duration};
@@ -400,8 +399,19 @@ impl ExchangeHeartbeat {
         &self,
         market: FullDerivativeMarket,
     ) -> crate::models::DerivativeMarketPayload {
-        // Extract market details and convert to our payload format
+        // Extract market details
         let market_data = market.market.unwrap_or_default();
+        
+        // Extract perpetual market state
+        let perp_state = match &market.info {
+            Some(Info::PerpetualInfo(state)) => Some(state),
+            _ => None,
+        };
+        
+        // Extract market_info and funding_info separately
+        let market_info = perp_state.and_then(|state| state.market_info.as_ref());
+        let funding_info = perp_state.and_then(|state| state.funding_info.as_ref());
+    
         crate::models::DerivativeMarketPayload {
             market_id: market_data.market_id,
             ticker: market_data.ticker,
@@ -415,9 +425,22 @@ impl ExchangeHeartbeat {
             is_perpetual: market_data.is_perpetual,
             status: self.map_market_status(market_data.status),
             mark_price: market.mark_price,
+            
+            min_price_tick: market_data.min_price_tick_size,
+            min_quantity_tick: market_data.min_quantity_tick_size,
+            min_notional: market_data.min_notional,
+            
+            // Get fields from market_info
+            hfr: market_info.map(|info| info.hourly_funding_rate_cap.clone()).unwrap_or_default(),
+            hir: market_info.map(|info| info.hourly_interest_rate.clone()).unwrap_or_default(),
+            funding_interval: market_info.map(|info| info.funding_interval.to_string()).unwrap_or_default(),
+            
+            // Get fields from funding_info
+            cumulative_funding: funding_info.map(|info| info.cumulative_funding.clone()).unwrap_or_default(),
+            cumulative_price: funding_info.map(|info| info.cumulative_price.clone()).unwrap_or_default(),
         }
     }
-
+    
     fn map_market_status(&self, status: i32) -> String {
         match status {
             1 => "Active".to_string(),

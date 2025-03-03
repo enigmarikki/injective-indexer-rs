@@ -10,6 +10,7 @@ mod models;
 mod consumer;
 mod redis_consumer;
 mod scylladb_consumer;
+mod compute;
 
 use config::Config;
 use consumer::KafkaConsumer;
@@ -39,14 +40,8 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
     
     info!("Configuration loaded");
     
-    // Create shutdown channel
-    let (shutdown_tx, mut shutdown_rx) = tokio::sync::mpsc::channel::<()>(1);
-    
-    // Clone config for consumers
-    let redis_config = config.clone();
-    let scylladb_config = config.clone();
-    
     // Initialize Redis processor
+    info!("Connecting to Redis at {}", redis_url);
     let redis_processor = match RedisProcessor::new(&redis_url) {
         Ok(processor) => {
             info!("Connected to Redis: {}", redis_url);
@@ -59,6 +54,7 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
     };
     
     // Initialize ScyllaDB processor
+    info!("Connecting to ScyllaDB at {}", scylladb_nodes.join(","));
     let scylladb_processor = match ScyllaDBProcessor::new(scylladb_nodes.clone()).await {
         Ok(processor) => {
             info!("Connected to ScyllaDB: {}", scylladb_nodes.join(","));
@@ -71,7 +67,8 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
     };
     
     // Create Redis consumer
-    let redis_consumer = match KafkaConsumer::new(&redis_config.kafka, redis_processor) {
+    info!("Creating Redis Kafka consumer");
+    let redis_consumer = match KafkaConsumer::new(&config.kafka, redis_processor) {
         Ok(consumer) => consumer,
         Err(e) => {
             error!("Failed to create Redis consumer: {}", e);
@@ -80,7 +77,8 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
     };
     
     // Create ScyllaDB consumer
-    let scylladb_consumer = match KafkaConsumer::new(&scylladb_config.kafka, scylladb_processor) {
+    info!("Creating ScyllaDB Kafka consumer");
+    let scylladb_consumer = match KafkaConsumer::new(&config.kafka, scylladb_processor) {
         Ok(consumer) => consumer,
         Err(e) => {
             error!("Failed to create ScyllaDB consumer: {}", e);
@@ -88,37 +86,34 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
         }
     };
     
-    // Handle Ctrl+C signal for graceful shutdown
-    let shutdown_tx_clone = shutdown_tx.clone();
-    tokio::spawn(async move {
-        if let Err(e) = ctrl_c().await {
-            error!("Error setting up Ctrl+C handler: {}", e);
-        }
-        info!("Received Ctrl+C, initiating shutdown");
-        let _ = shutdown_tx_clone.send(()).await;
-    });
-    
-    // Start Redis consumer
+    // Start consumers in separate tasks
+    info!("Starting consumers");
     let redis_handle = task::spawn(async move {
         if let Err(e) = redis_consumer.start().await {
             error!("Redis consumer error: {}", e);
         }
     });
     
-    // Start ScyllaDB consumer
     let scylladb_handle = task::spawn(async move {
         if let Err(e) = scylladb_consumer.start().await {
             error!("ScyllaDB consumer error: {}", e);
         }
     });
     
-    // Wait for shutdown signal
-    shutdown_rx.recv().await;
-    info!("Shutting down consumers...");
+    // Set up signal handler for graceful shutdown
+    let shutdown_handle = task::spawn(async move {
+        match ctrl_c().await {
+            Ok(()) => {
+                info!("Received shutdown signal, stopping consumers...");
+            }
+            Err(e) => {
+                error!("Error waiting for shutdown signal: {}", e);
+            }
+        }
+    });
     
-    // Wait for consumers to finish (this is a simplification as we can't actually
-    // cancel the consumer tasks cleanly without additional work)
-    let _ = join_all(vec![redis_handle, scylladb_handle]).await;
+    // Wait for all tasks to complete (or be cancelled)
+    let _ = join_all(vec![redis_handle, scylladb_handle, shutdown_handle]).await;
     
     info!("Application shutting down");
     Ok(())
