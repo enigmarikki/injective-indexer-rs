@@ -28,7 +28,7 @@ impl Default for Config {
         Config {
             grpc: GrpcConfig {
                 stream_endpoint: "http://localhost:1999".to_string(),
-                query_endpoint: "http://localhost:1900".to_string(),
+                query_endpoint: "http://localhost:9900".to_string(),
             },
             kafka: KafkaConfig {
                 brokers: vec!["localhost:9092".to_string()],
