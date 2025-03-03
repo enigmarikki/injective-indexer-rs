@@ -1,127 +1,114 @@
-use async_trait::async_trait;
-use rdkafka::producer::{FutureProducer, FutureRecord};
+use crate::config::KafkaConfig;
+use crate::models::KafkaMessage;
 use rdkafka::config::ClientConfig;
-use lapin::{
-    Connection, ConnectionProperties, Channel,
-    options::BasicPublishOptions,
-    BasicProperties,
-};
-use redis::{Client, AsyncCommands};
-use tokio::time::Duration;
-use std::error::Error;
-use tracing::{info, error};
-use crate::models::Event;
-use crate::config::{KafkaConfig, RabbitMqConfig, RedisConfig};
-
-#[async_trait]
-pub trait MessageProducer: Send + Sync {
-    async fn publish(&self, event: &Event) -> Result<(), Box<dyn Error + Send + Sync>>;
-}
+use rdkafka::producer::{FutureProducer, FutureRecord};
+use rdkafka::util::Timeout;
+use std::time::Duration;
 
 pub struct KafkaProducer {
     producer: FutureProducer,
     topic: String,
+    timeout: Duration,
 }
 
 impl KafkaProducer {
-    pub async fn new(config: KafkaConfig) -> Result<Self, Box<dyn Error + Send + Sync>> {
+    pub fn new(config: &KafkaConfig) -> Result<Self, rdkafka::error::KafkaError> {
         let producer = ClientConfig::new()
-            .set("bootstrap.servers", &config.bootstrap_servers)
+            .set("bootstrap.servers", &config.brokers.join(","))
+            .set("client.id", &config.client_id)
             .set("message.timeout.ms", "5000")
+            .set("queue.buffering.max.messages", "100000")
             .create()?;
 
-        Ok(Self {
+        Ok(KafkaProducer {
             producer,
-            topic: config.topic,
+            topic: config.topic.clone(),
+            timeout: Duration::from_secs(5),
         })
     }
-}
 
-#[async_trait]
-impl MessageProducer for KafkaProducer {
-    async fn publish(&self, event: &Event) -> Result<(), Box<dyn Error + Send + Sync>> {
-        let payload = serde_json::to_vec(event)?;
+    pub async fn send_message(&self, message: KafkaMessage) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let payload = serde_json::to_string(&message)?;
+        let key = format!("{}-{}", message.block_height, message.block_time);
+
         let record = FutureRecord::to(&self.topic)
             .payload(&payload)
-            .key(&event.id);
+            .key(&key);
 
-        self.producer.send(record, Duration::from_secs(5))
+        self.producer
+            .send(record, Timeout::After(self.timeout))
             .await
-            .map_err(|(e, _)| Box::new(e) as Box<dyn Error + Send + Sync>)?;
+            .map_err(|(err, _)| err)?;
 
-        info!("Published event {} to Kafka topic {}", event.id, self.topic);
+        Ok(())
+    }
+
+    pub async fn send_messages(&self, messages: Vec<KafkaMessage>) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        for message in messages {
+            self.send_message(message).await?;
+        }
         Ok(())
     }
 }
 
-pub struct RabbitMqProducer {
-    channel: Channel,
-    exchange: String,
-    routing_key: String,
+// Batch mode implementation for higher throughput
+pub struct BatchKafkaProducer {
+    producer: FutureProducer,
+    topic: String,
 }
 
-impl RabbitMqProducer {
-    pub async fn new(config: RabbitMqConfig) -> Result<Self, Box<dyn Error + Send + Sync>> {
-        let conn = Connection::connect(
-            &config.uri,
-            ConnectionProperties::default().with_tokio(),
-        ).await?;
-        
-        let channel = conn.create_channel().await?;
-        
-        Ok(Self {
-            channel,
-            exchange: config.exchange,
-            routing_key: config.routing_key,
+impl BatchKafkaProducer {
+    pub fn new(config: &KafkaConfig) -> Result<Self, rdkafka::error::KafkaError> {
+        let producer = ClientConfig::new()
+            .set("bootstrap.servers", &config.brokers.join(","))
+            .set("client.id", &config.client_id)
+            .set("message.timeout.ms", "30000")
+            .set("queue.buffering.max.messages", "100000")
+            .set("batch.size", "16384") // 16KB
+            .set("linger.ms", "5")      // 5ms batch collection time
+            .set("compression.type", "snappy")
+            .create()?;
+
+        Ok(BatchKafkaProducer {
+            producer,
+            topic: config.topic.clone(),
         })
     }
-}
-
-#[async_trait]
-impl MessageProducer for RabbitMqProducer {
-    async fn publish(&self, event: &Event) -> Result<(), Box<dyn Error + Send + Sync>> {
-        let payload = serde_json::to_vec(event)?;
+    
+    pub async fn send_batch(&self, messages: Vec<KafkaMessage>) -> Vec<Result<(), rdkafka::error::KafkaError>> {
+        // Convert all messages to payload strings up front, keeping them alive for the whole function
+        let message_payloads: Vec<(String, String)> = messages.into_iter()
+            .filter_map(|message| {
+                let key = format!("{}-{}", message.block_height, message.block_time);
+                match serde_json::to_string(&message) {
+                    Ok(payload) => Some((key, payload)),
+                    Err(e) => {
+                        log::error!("Failed to serialize message: {}", e);
+                        None
+                    }
+                }
+            })
+            .collect();
         
-        self.channel.basic_publish(
-            &self.exchange,
-            &self.routing_key,
-            BasicPublishOptions::default(),
-            &payload,
-            BasicProperties::default()
-                .with_message_id(event.id.clone().into())
-                .with_content_type("application/json".into()),
-        ).await?;
+        // Create futures for each message
+        let mut futures = Vec::with_capacity(message_payloads.len());
         
-        info!("Published event {} to RabbitMQ exchange {}", event.id, self.exchange);
-        Ok(())
-    }
-}
-
-pub struct RedisProducer {
-    client: Client,
-    channel: String,
-}
-
-impl RedisProducer {
-    pub async fn new(config: RedisConfig) -> Result<Self, Box<dyn Error + Send + Sync>> {
-        let client = Client::open(config.uri)?;
+        for (key, payload) in &message_payloads {
+            let record = FutureRecord::to(&self.topic)
+                .payload(payload)
+                .key(key);
+            
+            let future = self.producer.send(record, Timeout::Never);
+            futures.push(future);
+        }
         
-        Ok(Self {
-            client,
-            channel: config.channel,
-        })
-    }
-}
-
-#[async_trait]
-impl MessageProducer for RedisProducer {
-    async fn publish(&self, event: &Event) -> Result<(), Box<dyn Error + Send + Sync>> {
-        let payload = serde_json::to_string(event)?;
-        let mut conn = self.client.get_async_connection().await?;
+        // Wait for all futures to complete
+        let mut results = Vec::with_capacity(futures.len());
+        for future in futures {
+            let result = future.await.map(|_| ()).map_err(|(err, _)| err);
+            results.push(result);
+        }
         
-        let _: i32 = conn.publish(&self.channel, payload).await?;
-        
-        info!("Published event {} to Redis channel {}", event.id, self.channel);
-        Ok(())
+        results
     }
 }

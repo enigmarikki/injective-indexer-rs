@@ -1,0 +1,4 @@
+Building and linking librdkafka statically
+Running command: "cp -a librdkafka/. /mnt/data2/repos/injective-indexer-low-latency/grpc/target/debug/build/rdkafka-sys-c3cbd0a925e01d0b/out" in dir: .
+Running command: "/mnt/data2/repos/injective-indexer-low-latency/grpc/target/debug/build/rdkafka-sys-c3cbd0a925e01d0b/out/configure --disable-ssl --disable-gssapi --disable-curl --disable-zstd --disable-lz4-ext" in dir: /mnt/data2/repos/injective-indexer-low-latency/grpc/target/debug/build/rdkafka-sys-c3cbd0a925e01d0b/out
+Running command: "make libs" in dir: /mnt/data2/repos/injective-indexer-low-latency/grpc/target/debug/build/rdkafka-sys-c3cbd0a925e01d0b/out
