@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 use std::env;
+use std::error::Error;
 use std::fs::File;
 use std::io::Read;
 use std::path::Path;
@@ -21,6 +22,11 @@ pub struct KafkaConfig {
     pub brokers: Vec<String>,
     pub topic: String,
     pub client_id: String,
+    pub consumer_group: String,
+    #[serde(default)]
+    pub redis_consumer_group: Option<String>,
+    #[serde(default)]
+    pub scylladb_consumer_group: Option<String>,
 }
 
 impl Default for Config {
@@ -34,44 +40,59 @@ impl Default for Config {
                 brokers: vec!["localhost:9092".to_string()],
                 topic: "injective-data".to_string(),
                 client_id: "injective-client".to_string(),
+                consumer_group: "injective-consumer".to_string(),
+                redis_consumer_group: None,
+                scylladb_consumer_group: None,
             },
         }
     }
 }
 
 impl Config {
-    pub fn from_file<P: AsRef<Path>>(path: P) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
+    pub fn from_file<P: AsRef<Path>>(path: P) -> Result<Self, Box<dyn Error + Send + Sync>> {
         let mut file = File::open(path)?;
         let mut contents = String::new();
         file.read_to_string(&mut contents)?;
-        
+
         let config: Config = serde_json::from_str(&contents)?;
         Ok(config)
     }
 
-    pub fn from_env() -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
+    pub fn from_env() -> Result<Self, Box<dyn Error + Send + Sync>> {
         let mut config = Config::default();
-        
+
         if let Ok(stream_endpoint) = env::var("GRPC_STREAM_ENDPOINT") {
             config.grpc.stream_endpoint = stream_endpoint;
         }
-        
+
         if let Ok(query_endpoint) = env::var("GRPC_QUERY_ENDPOINT") {
             config.grpc.query_endpoint = query_endpoint;
         }
-        
+
         if let Ok(brokers) = env::var("KAFKA_BROKERS") {
             config.kafka.brokers = brokers.split(',').map(|s| s.to_string()).collect();
         }
-        
+
         if let Ok(topic) = env::var("KAFKA_TOPIC") {
             config.kafka.topic = topic;
         }
-        
+
         if let Ok(client_id) = env::var("KAFKA_CLIENT_ID") {
             config.kafka.client_id = client_id;
         }
-        
+
+        if let Ok(consumer_group) = env::var("KAFKA_CONSUMER_GROUP") {
+            config.kafka.consumer_group = consumer_group;
+        }
+
+        if let Ok(redis_group) = env::var("KAFKA_REDIS_CONSUMER_GROUP") {
+            config.kafka.redis_consumer_group = Some(redis_group);
+        }
+
+        if let Ok(scylladb_group) = env::var("KAFKA_SCYLLADB_CONSUMER_GROUP") {
+            config.kafka.scylladb_consumer_group = Some(scylladb_group);
+        }
+
         Ok(config)
     }
 }

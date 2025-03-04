@@ -1,6 +1,5 @@
-use serde::{Deserialize, Serialize};
 use chrono::{DateTime, Utc};
-
+use serde::{Deserialize, Serialize};
 
 // Market data structure
 #[derive(Clone, Debug)]
@@ -220,9 +219,8 @@ pub struct DerivativeMarketPayload {
     pub hir: String,
     pub funding_interval: String,
     pub cumulative_funding: String,
-    pub cumulative_price : String
+    pub cumulative_price: String,
 }
-
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExchangeBalancePayload {

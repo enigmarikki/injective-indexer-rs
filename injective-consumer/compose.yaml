@@ -1,0 +1,86 @@
+version: '3.8'
+
+services:
+  # Dragonfly - Redis compatible database
+  dragonfly:
+    image: 'docker.dragonflydb.io/dragonflydb/dragonfly'
+    container_name: dragonfly
+    ulimits:
+      memlock: -1
+    ports:
+      - "6379:6379"
+    volumes:
+      - dragonfly-data:/data
+    command: '--requirepass ${REDIS_PASSWORD:-injectivepass}'
+    networks:
+      - injective-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "-h", "localhost", "-p", "6379", "-a", "${REDIS_PASSWORD:-injectivepass}", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  # ScyllaDB - Cassandra compatible database
+  scylladb:
+    image: scylladb/scylla:5.2
+    container_name: scylladb
+    ports:
+      - "9042:9042"
+    volumes:
+      - scylla-data:/var/lib/scylla
+    command: --smp 1 --memory 1G --overprovisioned 1 --api-address 0.0.0.0
+    networks:
+      - injective-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "cqlsh", "-e", "describe keyspaces"]
+      interval: 10s
+      timeout: 10s
+      retries: 5
+
+  # ScyllaDB initialization
+  scylladb-init:
+    image: scylladb/scylla:5.2
+    container_name: scylladb-init
+    depends_on:
+      - scylladb
+    volumes:
+      - ./scripts/init-scylladb.sh:/init-scylladb.sh
+    command: bash /init-scylladb.sh
+    networks:
+      - injective-network
+
+  # Our Injective processor application
+  injective-processor:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: injective-processor
+    depends_on:
+      - dragonfly
+      - scylladb
+      - scylladb-init
+    environment:
+      - RUST_LOG=info
+      - CONFIG_FILE=/app/config/config.json
+      - KAFKA_BROKERS=${KAFKA_BROKERS:-localhost:9092}
+      - KAFKA_TOPIC=${KAFKA_TOPIC:-injective-data}
+      - KAFKA_CONSUMER_GROUP=${KAFKA_CONSUMER_GROUP:-injective-consumers}
+      - REDIS_URL=redis://:${REDIS_PASSWORD:-injectivepass}@dragonfly:6379
+      - SCYLLADB_NODES=scylladb:9042
+    volumes:
+      - ./config:/app/config
+    networks:
+      - injective-network
+    restart: unless-stopped
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+networks:
+  injective-network:
+    driver: bridge
+
+volumes:
+  dragonfly-data:
+  scylla-data:

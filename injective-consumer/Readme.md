@@ -1,9 +1,9 @@
 # Injective Consumer Base
 
-This is a base library for building Kafka consumers for Injective Protocol data. It provides:
+This is a base library for building Kafka consumers for Injective data. It provides:
 
 - Core Kafka consumer implementation
-- Data models for Injective Protocol data
+- Data models for Injective data
 - Configuration handling
 - Base types and traits
 
@@ -11,7 +11,7 @@ This is a base library for building Kafka consumers for Injective Protocol data.
 
 - **MessageProcessor Trait**: Define your own message processors that implement this trait to handle Kafka messages
 - **KafkaConsumer**: A reusable Kafka consumer that can be configured with different message processors
-- **Data Models**: Complete set of data models for Injective Protocol data
+- **Data Models**: Complete set of data models for Injective data
 
 ## Usage
 
