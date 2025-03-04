@@ -1,0 +1,34 @@
+# Build stage: compile the Rust project with necessary build dependencies
+FROM rust:latest as builder
+
+WORKDIR /usr/src/app
+
+# Install build dependencies (including libsasl2-dev for sasl2-sys)
+RUN apt-get update && \
+    apt-get install -y libssl-dev libsasl2-dev pkg-config && \
+    rm -rf /var/lib/apt/lists/*
+
+# Copy the project files from the injective-consumer folder
+COPY ./injective-consumer .
+
+# Build the binary in release mode
+RUN cargo build --release
+
+# Runtime stage: use a lightweight Debian image
+FROM debian:bookworm-slim
+
+# Install runtime libraries:
+# - ca-certificates for SSL
+# - libssl3 (or the appropriate runtime libssl package) for OpenSSL
+# - libsasl2-2 provides libsasl2.so.2
+RUN apt-get update && \
+    apt-get install -y ca-certificates libssl3 libsasl2-2 && \
+    rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+# Copy the compiled binary from the builder stage
+COPY --from=builder /usr/src/app/target/release/injective-consumer /app/injective-consumer
+
+# Set the binary as the container's entrypoint
+ENTRYPOINT ["/app/injective-consumer"]
