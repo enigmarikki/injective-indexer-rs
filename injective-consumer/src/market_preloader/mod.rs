@@ -10,6 +10,9 @@ use std::error::Error;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
+const PRICE_DECIMAL: f64 = 1e24;
+const QUANTITY_DECIMAL: f64 = 1e18;
+
 // A dedicated processor that only handles market data
 pub struct MarketPreloader {
     _client: Client,
@@ -57,25 +60,23 @@ impl MarketPreloader {
         let mut conn = self.connection.lock().await;
 
         // Extract cumulative funding
-        let cumulative_funding = market.cumulative_funding.parse::<f64>().unwrap_or(0.0);
+        let cumulative_funding =
+            market.cumulative_funding.parse::<f64>().unwrap_or(0.0) / PRICE_DECIMAL;
 
         // Parse other market data safely
-        let mark_price = market.mark_price.parse::<f64>().unwrap_or(0.0);
+        let mark_price = market.mark_price.parse::<f64>().unwrap_or(0.0) / PRICE_DECIMAL;
         let maintenance_margin_ratio = market
             .maintenance_margin_ratio
             .parse::<f64>()
-            .unwrap_or(0.05);
+            .unwrap_or(0.0)
+            / QUANTITY_DECIMAL;
 
         // Store market data in Redis
         let key = format!("market:derivative:{}", market.market_id);
 
         conn.hset::<_, _, _, ()>(&key, "ticker", &market.ticker)?;
-        conn.hset::<_, _, _, ()>(&key, "mark_price", &market.mark_price)?;
-        conn.hset::<_, _, _, ()>(
-            &key,
-            "maintenance_margin_ratio",
-            &market.maintenance_margin_ratio,
-        )?;
+        conn.hset::<_, _, _, ()>(&key, "mark_price", mark_price.to_string())?;
+        conn.hset::<_, _, _, ()>(&key, "maintenance_margin_ratio", maintenance_margin_ratio)?;
         conn.hset::<_, _, _, ()>(&key, "cumulative_funding", cumulative_funding.to_string())?;
         conn.hset::<_, _, _, ()>(&key, "block_height", block_height.to_string())?;
         conn.hset::<_, _, _, ()>(&key, "timestamp", timestamp.to_string())?;
@@ -94,8 +95,8 @@ impl MarketPreloader {
         if let Some(pubsub) = &self.pubsub {
             let market_data = serde_json::json!({
                 "ticker": market.ticker,
-                "mark_price": market.mark_price,
-                "maintenance_margin_ratio": market.maintenance_margin_ratio,
+                "mark_price": mark_price.to_string(),
+                "maintenance_margin_ratio": maintenance_margin_ratio.to_string(),
                 "cumulative_funding": cumulative_funding.to_string(),
                 "block_height": block_height.to_string(),
                 "timestamp": timestamp.to_string(),
@@ -112,7 +113,8 @@ impl MarketPreloader {
             }
 
             // Also publish price update for clients only interested in prices
-            let price_event = pubsub.create_price_update(&market.market_id, &market.mark_price);
+            let price_event =
+                pubsub.create_price_update(&market.market_id, &mark_price.to_string());
 
             if let Err(e) = pubsub.publish_event(price_event).await {
                 warn!("Failed to publish price update through PubSub: {}", e);
@@ -261,11 +263,7 @@ impl MarketPreloader {
                     });
 
                     // Add to batch for efficient publishing
-                    let liquidation_event = pubsub.create_liquidation_alert(
-                        &market.market_id,
-                        &subaccount_id,
-                        alert_data,
-                    );
+                    let liquidation_event = pubsub.create_liquidation_alert(alert_data);
 
                     liquidation_events.push(liquidation_event);
                 }

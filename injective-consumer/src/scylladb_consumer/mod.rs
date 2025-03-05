@@ -8,6 +8,10 @@ use scylla::{Session, SessionBuilder};
 use std::error::Error;
 use std::sync::Arc;
 
+// Add these constants to match the other file
+const PRICE_DECIMAL: f64 = 1e24;
+const QUANTITY_DECIMAL: f64 = 1e18;
+
 pub struct ScyllaDBProcessor {
     session: Arc<Session>,
 }
@@ -90,8 +94,12 @@ impl ScyllaDBProcessor {
         block_height: i64,
         timestamp: i64,
     ) -> Result<(), Box<dyn Error + Send + Sync>> {
-        let cumulative_funding = market.cumulative_funding.parse::<f64>().unwrap_or(0.0);
-        let mark_price = market.mark_price.parse::<f64>().unwrap_or(0.0);
+        // Apply proper scaling to prices
+        let cumulative_funding =
+            market.cumulative_funding.parse::<f64>().unwrap_or(0.0) / PRICE_DECIMAL;
+        let mark_price = market.mark_price.parse::<f64>().unwrap_or(0.0) / PRICE_DECIMAL;
+
+        // No scaling for ratio
         let maintenance_margin_ratio = market
             .maintenance_margin_ratio
             .parse::<f64>()
@@ -108,6 +116,7 @@ impl ScyllaDBProcessor {
             _ => 0,
         };
 
+        // Store the scaled values as strings
         let market_query = "INSERT INTO injective.markets (
             market_id, block_height, timestamp, ticker, mark_price, maintenance_margin_ratio, cumulative_funding
         ) VALUES (?, ?, ?, ?, ?, ?, ?)";
@@ -120,9 +129,9 @@ impl ScyllaDBProcessor {
                     block_height,
                     datetime_millis,
                     &market.ticker,
-                    &market.mark_price,
+                    mark_price.to_string(), // Store scaled value
                     &market.maintenance_margin_ratio,
-                    cumulative_funding.to_string(),
+                    cumulative_funding.to_string(), // Store scaled value
                 ),
             )
             .await
@@ -167,6 +176,7 @@ impl ScyllaDBProcessor {
                 pos_block_height,
             ) = row;
 
+            // Values from database are already scaled, no need to re-scale
             let quantity_val = quantity.parse::<f64>().unwrap_or(0.0);
             let entry_price_val = entry_price.parse::<f64>().unwrap_or(0.0);
             let margin_val = margin.parse::<f64>().unwrap_or(0.0);
@@ -181,6 +191,7 @@ impl ScyllaDBProcessor {
                 continue;
             }
 
+            // All inputs to calculate_liquidation_price are already scaled
             let liquidation_price = calculate_liquidation_price(
                 is_long,
                 entry_price_val,
@@ -212,6 +223,7 @@ impl ScyllaDBProcessor {
                 continue;
             }
 
+            // Both inputs already scaled
             let liquidatable = is_liquidatable(is_long, liquidation_price, mark_price);
             if liquidatable {
                 let liquidatable_query = "INSERT INTO injective.liquidatable_positions (
@@ -267,14 +279,16 @@ impl ScyllaDBProcessor {
         block_height: i64,
         timestamp: i64,
     ) -> Result<(), Box<dyn Error + Send + Sync>> {
+        // Apply proper scaling
         let is_long = position.is_long;
-        let quantity = position.quantity.parse::<f64>().unwrap_or(0.0);
-        let entry_price = position.entry_price.parse::<f64>().unwrap_or(0.0);
-        let margin = position.margin.parse::<f64>().unwrap_or(0.0);
+        let quantity = position.quantity.parse::<f64>().unwrap_or(0.0) / QUANTITY_DECIMAL;
+        let entry_price = position.entry_price.parse::<f64>().unwrap_or(0.0) / PRICE_DECIMAL;
+        let margin = position.margin.parse::<f64>().unwrap_or(0.0) / PRICE_DECIMAL;
         let cumulative_funding_entry = position
             .cumulative_funding_entry
             .parse::<f64>()
-            .unwrap_or(0.0);
+            .unwrap_or(0.0)
+            / PRICE_DECIMAL;
 
         if quantity <= 0.0 || entry_price <= 0.0 || margin <= 0.0 {
             warn!(
@@ -306,9 +320,9 @@ impl ScyllaDBProcessor {
                 if let Some(row) = rows_iter.next().transpose()? {
                     let (mp, mmr, mcf) = row;
                     (
-                        mp.parse::<f64>().unwrap_or(0.0),
-                        mmr.parse::<f64>().unwrap_or(0.05),
-                        mcf.parse::<f64>().unwrap_or(0.0),
+                        mp.parse::<f64>().unwrap_or(0.0),   // Already scaled in DB
+                        mmr.parse::<f64>().unwrap_or(0.05), // Ratio, no scaling
+                        mcf.parse::<f64>().unwrap_or(0.0),  // Already scaled in DB
                     )
                 } else {
                     (0.0, 0.05, 0.0)
@@ -318,6 +332,7 @@ impl ScyllaDBProcessor {
             }
         };
 
+        // All inputs now properly scaled
         let liquidation_price = calculate_liquidation_price(
             is_long,
             entry_price,
@@ -347,10 +362,10 @@ impl ScyllaDBProcessor {
                     block_height,
                     datetime_millis,
                     is_long,
-                    &position.quantity,
-                    &position.entry_price,
-                    &position.margin,
-                    &position.cumulative_funding_entry,
+                    quantity.to_string(),                 // Store scaled value
+                    entry_price.to_string(),              // Store scaled value
+                    margin.to_string(),                   // Store scaled value
+                    cumulative_funding_entry.to_string(), // Store scaled value
                     liquidation_price.to_string(),
                 ),
             )
@@ -360,6 +375,7 @@ impl ScyllaDBProcessor {
                 e
             })?;
 
+        // Both inputs already scaled
         let liquidatable = is_liquidatable(is_long, liquidation_price, mark_price);
 
         if liquidatable {
@@ -378,9 +394,9 @@ impl ScyllaDBProcessor {
                         block_height,
                         datetime_millis,
                         is_long,
-                        &position.quantity,
-                        &position.entry_price,
-                        &position.margin,
+                        quantity.to_string(),    // Store scaled value
+                        entry_price.to_string(), // Store scaled value
+                        margin.to_string(),      // Store scaled value
                         liquidation_price.to_string(),
                         mark_price.to_string(),
                     ),

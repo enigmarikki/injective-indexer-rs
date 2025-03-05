@@ -258,8 +258,14 @@ impl RedisProcessor {
 
             // Create position update data for PubSub
             if let Some(pubsub) = &self.pubsub {
-                let position_data = serde_json::json!({
-                    "is_long": is_long,
+                // Create position update event
+                let event = StreamEvent {
+                    event_type: EventType::PositionUpdate,
+                    timestamp,
+                    payload: serde_json::json!({
+                        "market_id": market.market_id,
+                        "subaccount_id": subaccount_id,
+                        "is_long": is_long,
                     "quantity": quantity.to_string(),
                     "entry_price": entry_price.to_string(),
                     "margin": margin.to_string(),
@@ -269,16 +275,6 @@ impl RedisProcessor {
                     "is_liquidatable": is_liquidatable,
                     "block_height": block_height.to_string(),
                     "timestamp": timestamp.to_string(),
-                });
-
-                // Create position update event
-                let event = StreamEvent {
-                    event_type: EventType::PositionUpdate,
-                    timestamp,
-                    payload: serde_json::json!({
-                        "market_id": market.market_id,
-                        "subaccount_id": subaccount_id,
-                        "data": position_data
                     }),
                 };
 
@@ -301,11 +297,7 @@ impl RedisProcessor {
                     });
 
                     // Add to batch for efficient publishing
-                    let liquidation_event = pubsub.create_liquidation_alert(
-                        &market.market_id,
-                        &subaccount_id,
-                        alert_data,
-                    );
+                    let liquidation_event = pubsub.create_liquidation_alert(alert_data);
 
                     liquidation_events.push(liquidation_event);
                 }
@@ -570,11 +562,7 @@ impl RedisProcessor {
 
             // Publish through HPC Redis PubSub
             if let Some(pubsub) = &self.pubsub {
-                let liquidation_event = pubsub.create_liquidation_alert(
-                    &position.market_id,
-                    &position.subaccount_id,
-                    alert_data,
-                );
+                let liquidation_event = pubsub.create_liquidation_alert(alert_data);
 
                 // Fixed: Use direct publish for liquidation events (higher priority)
                 if let Err(e) = pubsub.publish_event(liquidation_event).await {

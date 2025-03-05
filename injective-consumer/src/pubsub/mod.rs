@@ -365,18 +365,11 @@ impl RedisPubSubService {
         }
     }
 
-    pub fn create_liquidation_alert(
-        &self,
-        market_id: &str,
-        subaccount_id: &str,
-        data: serde_json::Value,
-    ) -> StreamEvent {
+    pub fn create_liquidation_alert(&self, data: serde_json::Value) -> StreamEvent {
         StreamEvent {
             event_type: EventType::LiquidationAlert,
             timestamp: chrono::Utc::now().timestamp_millis() as u64,
             payload: serde_json::json!({
-                "market_id": market_id,
-                "subaccount_id": subaccount_id,
                 "data": data
             }),
         }
