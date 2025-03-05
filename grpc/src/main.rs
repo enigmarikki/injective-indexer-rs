@@ -216,7 +216,10 @@ async fn process_stream_response(
             }
         }
 
-        let success_count = results.iter().filter(|r: &&Result<(), rdkafka::error::KafkaError>| r.is_ok()).count();
+        let success_count = results
+            .iter()
+            .filter(|r: &&Result<(), rdkafka::error::KafkaError>| r.is_ok())
+            .count();
         info!(
             "Successfully sent {}/{} messages to Kafka",
             success_count,

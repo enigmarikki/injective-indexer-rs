@@ -208,7 +208,7 @@ pub struct ExchangeBalancePayload {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct FullLimitOrderbookPayload{
+pub struct FullLimitOrderbookPayload {
     pub market_id: String,
     pub bids: Vec<TrimmedLimitOrderPayload>,
     pub asks: Vec<TrimmedLimitOrderPayload>,
