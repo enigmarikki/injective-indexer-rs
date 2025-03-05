@@ -19,7 +19,7 @@ enum ProcessingPhase {
     Others,
 }
 const PRICE_DECIMAL: f64 = 1e24;
-const QUANTITY_DECIMAL: f64 = 1e18;
+const CHAIN_DECIMAL: f64 = 1e18;
 
 pub struct RedisProcessor {
     _client: Client,
@@ -70,11 +70,11 @@ impl RedisProcessor {
         // Parse and scale other market data safely
         let mark_price = market.mark_price.parse::<f64>().unwrap_or(0.0) / PRICE_DECIMAL;
 
-        // Maintenance margin ratio is a percentage, so no scaling needed
         let maintenance_margin_ratio = market
             .maintenance_margin_ratio
             .parse::<f64>()
-            .unwrap_or(0.05);
+            .unwrap_or(0.05)
+            / CHAIN_DECIMAL;
 
         // Store market data in Redis (already scaled)
         let key = format!("market:derivative:{}", market.market_id);
@@ -85,7 +85,7 @@ impl RedisProcessor {
         conn.hset::<_, _, _, ()>(
             &key,
             "maintenance_margin_ratio",
-            &market.maintenance_margin_ratio,
+            maintenance_margin_ratio.to_string(),
         )?;
         conn.hset::<_, _, _, ()>(&key, "cumulative_funding", cumulative_funding.to_string())?;
         conn.hset::<_, _, _, ()>(&key, "block_height", block_height.to_string())?;
@@ -133,7 +133,7 @@ impl RedisProcessor {
             let market_data = serde_json::json!({
                 "ticker": market.ticker,
                 "mark_price": mark_price.to_string(),
-                "maintenance_margin_ratio": market.maintenance_margin_ratio,
+                "maintenance_margin_ratio": maintenance_margin_ratio.to_string(),
                 "cumulative_funding": cumulative_funding.to_string(),
                 "block_height": block_height.to_string(),
                 "timestamp": timestamp.to_string(),
@@ -141,7 +141,7 @@ impl RedisProcessor {
             });
 
             // Create market update event
-            let market_event = pubsub.create_market_update(&market.market_id, market_data);
+            let market_event = pubsub.create_market_update(market_data);
 
             // Publish through HPC Redis PubSub
             if let Err(e) = pubsub.publish_event(market_event).await {
@@ -156,195 +156,6 @@ impl RedisProcessor {
                 warn!("Failed to publish price update through PubSub: {}", e);
             }
         }
-
-        // Reacquire connection lock for position updates
-        let mut conn = self.connection.lock().await;
-
-        // Update all positions for this market with new liquidation prices
-        let positions_key = format!("positions:market:{}", market.market_id);
-        let subaccount_ids: Vec<String> = conn.smembers(&positions_key)?;
-
-        // Batch liquidation updates for efficiency
-        let mut liquidation_events = Vec::new();
-
-        for subaccount_id in subaccount_ids {
-            let position_key = format!("position:{}:{}", market.market_id, subaccount_id);
-
-            // Get position data with better error handling
-            let is_long: bool = match conn.hget::<_, _, Option<String>>(&position_key, "is_long") {
-                Ok(Some(value)) => value.parse().unwrap_or(false),
-                _ => {
-                    warn!(
-                        "Missing is_long value for position {}, skipping",
-                        position_key
-                    );
-                    continue;
-                }
-            };
-
-            // Values from Redis are already scaled, no need to scale again
-            let quantity: f64 = match conn.hget::<_, _, Option<String>>(&position_key, "quantity") {
-                Ok(Some(value)) => value.parse().unwrap_or(0.0),
-                _ => {
-                    warn!(
-                        "Missing quantity value for position {}, skipping",
-                        position_key
-                    );
-                    continue;
-                }
-            };
-
-            let entry_price: f64 =
-                match conn.hget::<_, _, Option<String>>(&position_key, "entry_price") {
-                    Ok(Some(value)) => value.parse().unwrap_or(0.0),
-                    _ => {
-                        warn!(
-                            "Missing entry_price value for position {}, skipping",
-                            position_key
-                        );
-                        continue;
-                    }
-                };
-
-            let margin: f64 = match conn.hget::<_, _, Option<String>>(&position_key, "margin") {
-                Ok(Some(value)) => value.parse().unwrap_or(0.0),
-                _ => {
-                    warn!(
-                        "Missing margin value for position {}, skipping",
-                        position_key
-                    );
-                    continue;
-                }
-            };
-
-            let cumulative_funding_entry: f64 = match conn
-                .hget::<_, _, Option<String>>(&position_key, "cumulative_funding_entry")
-            {
-                Ok(Some(value)) => value.parse().unwrap_or(0.0),
-                _ => 0.0, // Default to 0 if missing
-            };
-
-            // Skip positions with invalid data
-            if quantity <= 0.0 || entry_price <= 0.0 || margin <= 0.0 {
-                warn!("Invalid position data for {}, skipping", position_key);
-                continue;
-            }
-
-            // Recalculate liquidation price (all values already scaled)
-            let liquidation_price = calculate_liquidation_price(
-                is_long,
-                entry_price,
-                margin,
-                quantity,
-                maintenance_margin_ratio,
-                cumulative_funding,
-                cumulative_funding_entry,
-            );
-
-            // Update the liquidation price
-            conn.hset::<_, _, _, ()>(
-                &position_key,
-                "liquidation_price",
-                liquidation_price.to_string(),
-            )?;
-
-            // Check if liquidatable (all values already scaled)
-            let is_liquidatable = is_liquidatable(is_long, liquidation_price, mark_price);
-            conn.hset::<_, _, _, ()>(
-                &position_key,
-                "is_liquidatable",
-                is_liquidatable.to_string(),
-            )?;
-
-            // Create position update data for PubSub
-            if let Some(pubsub) = &self.pubsub {
-                // Create position update event
-                let event = StreamEvent {
-                    event_type: EventType::PositionUpdate,
-                    timestamp,
-                    payload: serde_json::json!({
-                        "market_id": market.market_id,
-                        "subaccount_id": subaccount_id,
-                        "is_long": is_long,
-                    "quantity": quantity.to_string(),
-                    "entry_price": entry_price.to_string(),
-                    "margin": margin.to_string(),
-                    "liquidation_price": liquidation_price.to_string(),
-                    "cumulative_funding_entry": cumulative_funding_entry.to_string(),
-                    "mark_price": mark_price.to_string(),
-                    "is_liquidatable": is_liquidatable,
-                    "block_height": block_height.to_string(),
-                    "timestamp": timestamp.to_string(),
-                    }),
-                };
-
-                // Publish position update
-                if let Err(e) = pubsub.publish_event(event).await {
-                    warn!("Failed to publish position update: {}", e);
-                }
-
-                // For liquidatable positions, also create a liquidation alert
-                if is_liquidatable {
-                    let alert_data = serde_json::json!({
-                        "market_id": market.market_id,
-                        "subaccount_id": subaccount_id,
-                        "is_long": is_long,
-                        "liquidation_price": liquidation_price,
-                        "mark_price": mark_price,
-                        "quantity": quantity.to_string(),
-                        "entry_price": entry_price.to_string(),
-                        "margin": margin.to_string(),
-                    });
-
-                    // Add to batch for efficient publishing
-                    let liquidation_event = pubsub.create_liquidation_alert(alert_data);
-
-                    liquidation_events.push(liquidation_event);
-                }
-            }
-
-            // Update liquidatable positions set and publish alerts
-            if is_liquidatable {
-                conn.sadd::<_, _, ()>(
-                    "liquidatable_positions",
-                    format!("{}:{}", market.market_id, subaccount_id),
-                )?;
-
-                // Legacy Redis publish for backward compatibility
-                let alert_data = serde_json::json!({
-                    "market_id": market.market_id,
-                    "subaccount_id": subaccount_id,
-                    "is_long": is_long,
-                    "liquidation_price": liquidation_price,
-                    "mark_price": mark_price,
-                    "quantity": quantity.to_string(),
-                    "entry_price": entry_price.to_string(),
-                    "margin": margin.to_string(),
-                });
-
-                conn.publish::<_, _, ()>("liquidation_alerts", alert_data.to_string())?;
-
-                info!(
-                    "Liquidatable position: market={}, subaccount={}, liq_price={}, mark_price={}",
-                    market.market_id, subaccount_id, liquidation_price, mark_price
-                );
-            } else {
-                conn.srem::<_, _, ()>(
-                    "liquidatable_positions",
-                    format!("{}:{}", market.market_id, subaccount_id),
-                )?;
-            }
-        }
-
-        // Batch publish liquidation events if any
-        if let Some(pubsub) = &self.pubsub {
-            if !liquidation_events.is_empty() {
-                if let Err(e) = pubsub.publish_events_batch(liquidation_events).await {
-                    warn!("Failed to publish liquidation alerts batch: {}", e);
-                }
-            }
-        }
-
         Ok(())
     }
 
@@ -401,7 +212,7 @@ impl RedisProcessor {
 
         // Parse and scale position data
         let is_long = position.is_long;
-        let quantity = position.quantity.parse::<f64>().unwrap_or(0.0) / QUANTITY_DECIMAL;
+        let quantity = position.quantity.parse::<f64>().unwrap_or(0.0) / CHAIN_DECIMAL;
         let entry_price = position.entry_price.parse::<f64>().unwrap_or(0.0) / PRICE_DECIMAL;
         let margin = position.margin.parse::<f64>().unwrap_or(0.0) / PRICE_DECIMAL;
         let cumulative_funding_entry = position

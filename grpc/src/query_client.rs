@@ -272,7 +272,7 @@ impl ExchangeHeartbeat {
 
         // Send to Kafka
         if !messages.is_empty() {
-            let results = self.producer.send_batch_low_latency(messages).await;
+            let results = self.producer.send_batch(messages).await;
             let success_count = results.iter().filter(|r| r.is_ok()).count();
             info!(
                 "Sent {}/{} derivative markets to Kafka at block height {}",
@@ -306,7 +306,7 @@ impl ExchangeHeartbeat {
 
         // Send to Kafka
         if !messages.is_empty() {
-            let results = self.producer.send_batch_low_latency(messages).await;
+            let results = self.producer.send_batch(messages).await;
             let success_count = results.iter().filter(|r| r.is_ok()).count();
             info!(
                 "Sent {}/{} positions to Kafka at block height {}",
@@ -340,7 +340,7 @@ impl ExchangeHeartbeat {
 
         // Send to Kafka
         if !messages.is_empty() {
-            let results = self.producer.send_batch_low_latency(messages).await;
+            let results = self.producer.send_batch(messages).await;
             let success_count = results.iter().filter(|r| r.is_ok()).count();
             info!(
                 "Sent {}/{} exchange balances to Kafka at block height {}",
@@ -383,7 +383,7 @@ impl ExchangeHeartbeat {
         };
 
         // Send to Kafka
-        let results = self.producer.send_batch_low_latency(vec![message]).await;
+        let results = self.producer.send_batch(vec![message]).await;
         if let Some(Err(e)) = results.first() {
             error!("Failed to send orderbook to Kafka: {}", e);
         } else {

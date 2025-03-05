@@ -207,7 +207,7 @@ async fn process_stream_response(
 
     if !messages.is_empty() {
         // Send to Kafka in a batch
-        let results = producer.send_batch_low_latency(messages).await;
+        let results = producer.send_batch(messages).await;
 
         // Log errors if any
         for (i, result) in results.iter().enumerate() {

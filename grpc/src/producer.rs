@@ -139,7 +139,7 @@ impl BatchKafkaProducer {
                 Ok(payload) => {
                     let record = FutureRecord::to(&self.topic).payload(&payload).key(&key);
                     self.producer
-                        .send(record, Timeout::After(Duration::from_millis(10)))
+                        .send(record, Timeout::After(Duration::from_micros(1)))
                         .await
                         .map(|_| ())
                         .map_err(|(e, _)| e)

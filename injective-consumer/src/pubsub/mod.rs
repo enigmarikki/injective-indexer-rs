@@ -343,12 +343,11 @@ impl RedisPubSubService {
     }
 
     // Helper methods to create common event types
-    pub fn create_market_update(&self, market_id: &str, data: serde_json::Value) -> StreamEvent {
+    pub fn create_market_update(&self, data: serde_json::Value) -> StreamEvent {
         StreamEvent {
             event_type: EventType::MarketUpdate,
             timestamp: chrono::Utc::now().timestamp_millis() as u64,
             payload: serde_json::json!({
-                "market_id": market_id,
                 "data": data
             }),
         }
