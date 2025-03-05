@@ -18,6 +18,8 @@ enum ProcessingPhase {
     Markets,
     Others,
 }
+const PRICE_DECIMAL: f64 = 1e24;
+const QUANTITY_DECIMAL: f64 = 1e18;
 
 pub struct RedisProcessor {
     _client: Client,
@@ -61,24 +63,25 @@ impl RedisProcessor {
         info!("DEBUG-10: Starting to process market {}", market.market_id);
         let mut conn = self.connection.lock().await;
 
-        // Extract cumulative funding
-        let cumulative_funding = market.cumulative_funding.parse::<f64>().unwrap_or(0.0);
+        // Extract and scale cumulative funding
+        let cumulative_funding =
+            market.cumulative_funding.parse::<f64>().unwrap_or(0.0) / PRICE_DECIMAL;
 
-        // Parse other market data safely
-        let mark_price = market.mark_price.parse::<f64>().unwrap_or(0.0);
+        // Parse and scale other market data safely
+        let mark_price = market.mark_price.parse::<f64>().unwrap_or(0.0) / PRICE_DECIMAL;
+
+        // Maintenance margin ratio is a percentage, so no scaling needed
         let maintenance_margin_ratio = market
             .maintenance_margin_ratio
             .parse::<f64>()
             .unwrap_or(0.05);
 
-        // Store market data in Redis
+        // Store market data in Redis (already scaled)
         let key = format!("market:derivative:{}", market.market_id);
-
-        // DEBUG-11: Log Redis operations
         info!("DEBUG-11: Storing market data to Redis key: {}", key);
 
         conn.hset::<_, _, _, ()>(&key, "ticker", &market.ticker)?;
-        conn.hset::<_, _, _, ()>(&key, "mark_price", &market.mark_price)?;
+        conn.hset::<_, _, _, ()>(&key, "mark_price", mark_price.to_string())?;
         conn.hset::<_, _, _, ()>(
             &key,
             "maintenance_margin_ratio",
@@ -129,7 +132,7 @@ impl RedisProcessor {
         if let Some(pubsub) = &self.pubsub {
             let market_data = serde_json::json!({
                 "ticker": market.ticker,
-                "mark_price": market.mark_price,
+                "mark_price": mark_price.to_string(),
                 "maintenance_margin_ratio": market.maintenance_margin_ratio,
                 "cumulative_funding": cumulative_funding.to_string(),
                 "block_height": block_height.to_string(),
@@ -146,7 +149,8 @@ impl RedisProcessor {
             }
 
             // Also publish price update for clients only interested in prices
-            let price_event = pubsub.create_price_update(&market.market_id, &market.mark_price);
+            let price_event =
+                pubsub.create_price_update(&market.market_id, &mark_price.to_string());
 
             if let Err(e) = pubsub.publish_event(price_event).await {
                 warn!("Failed to publish price update through PubSub: {}", e);
@@ -178,6 +182,7 @@ impl RedisProcessor {
                 }
             };
 
+            // Values from Redis are already scaled, no need to scale again
             let quantity: f64 = match conn.hget::<_, _, Option<String>>(&position_key, "quantity") {
                 Ok(Some(value)) => value.parse().unwrap_or(0.0),
                 _ => {
@@ -225,7 +230,7 @@ impl RedisProcessor {
                 continue;
             }
 
-            // Recalculate liquidation price
+            // Recalculate liquidation price (all values already scaled)
             let liquidation_price = calculate_liquidation_price(
                 is_long,
                 entry_price,
@@ -243,7 +248,7 @@ impl RedisProcessor {
                 liquidation_price.to_string(),
             )?;
 
-            // Check if liquidatable
+            // Check if liquidatable (all values already scaled)
             let is_liquidatable = is_liquidatable(is_long, liquidation_price, mark_price);
             conn.hset::<_, _, _, ()>(
                 &position_key,
@@ -402,15 +407,16 @@ impl RedisProcessor {
 
         info!("DEBUG-24: Market exists for position, continuing processing");
 
-        // Parse position data safely
+        // Parse and scale position data
         let is_long = position.is_long;
-        let quantity = position.quantity.parse::<f64>().unwrap_or(0.0);
-        let entry_price = position.entry_price.parse::<f64>().unwrap_or(0.0);
-        let margin = position.margin.parse::<f64>().unwrap_or(0.0);
+        let quantity = position.quantity.parse::<f64>().unwrap_or(0.0) / QUANTITY_DECIMAL;
+        let entry_price = position.entry_price.parse::<f64>().unwrap_or(0.0) / PRICE_DECIMAL;
+        let margin = position.margin.parse::<f64>().unwrap_or(0.0) / PRICE_DECIMAL;
         let cumulative_funding_entry = position
             .cumulative_funding_entry
             .parse::<f64>()
-            .unwrap_or(0.0);
+            .unwrap_or(0.0)
+            / PRICE_DECIMAL;
 
         // Skip positions with invalid data
         if quantity <= 0.0 || entry_price <= 0.0 || margin <= 0.0 {
@@ -422,6 +428,7 @@ impl RedisProcessor {
         }
 
         // Get market data for calculating liquidation price
+        // Values from Redis are already scaled, no need to scale again
         let mark_price: f64 = match conn.hget::<_, _, Option<String>>(&market_key, "mark_price") {
             Ok(Some(value)) => value.parse().unwrap_or(0.0),
             _ => {
@@ -433,6 +440,7 @@ impl RedisProcessor {
             }
         };
 
+        // Maintenance margin is a ratio, no scaling needed
         let maintenance_margin_ratio: f64 =
             match conn.hget::<_, _, Option<String>>(&market_key, "maintenance_margin_ratio") {
                 Ok(Some(value)) => value.parse().unwrap_or(0.05),
@@ -457,7 +465,7 @@ impl RedisProcessor {
                 }
             };
 
-        // Calculate liquidation price
+        // Calculate liquidation price (all values already scaled)
         let liquidation_price = calculate_liquidation_price(
             is_long,
             entry_price,
@@ -468,18 +476,18 @@ impl RedisProcessor {
             cumulative_funding_entry,
         );
 
-        // Store position data
+        // Store position data (all values already scaled)
         let key = format!("position:{}:{}", position.market_id, position.subaccount_id);
         info!("DEBUG-26: Storing position to Redis key: {}", key);
 
         conn.hset::<_, _, _, ()>(&key, "is_long", position.is_long.to_string())?;
-        conn.hset::<_, _, _, ()>(&key, "quantity", &position.quantity)?;
-        conn.hset::<_, _, _, ()>(&key, "entry_price", &position.entry_price)?;
-        conn.hset::<_, _, _, ()>(&key, "margin", &position.margin)?;
+        conn.hset::<_, _, _, ()>(&key, "quantity", quantity.to_string())?;
+        conn.hset::<_, _, _, ()>(&key, "entry_price", entry_price.to_string())?;
+        conn.hset::<_, _, _, ()>(&key, "margin", margin.to_string())?;
         conn.hset::<_, _, _, ()>(
             &key,
             "cumulative_funding_entry",
-            &position.cumulative_funding_entry,
+            cumulative_funding_entry.to_string(),
         )?;
         conn.hset::<_, _, _, ()>(&key, "liquidation_price", liquidation_price.to_string())?;
         conn.hset::<_, _, _, ()>(&key, "block_height", block_height.to_string())?;
@@ -495,7 +503,7 @@ impl RedisProcessor {
             &position.market_id,
         )?;
 
-        // Check if liquidatable
+        // Check if liquidatable (all values already scaled)
         let is_liquidatable = is_liquidatable(is_long, liquidation_price, mark_price);
         conn.hset::<_, _, _, ()>(&key, "is_liquidatable", is_liquidatable.to_string())?;
 
@@ -508,6 +516,7 @@ impl RedisProcessor {
                 "margin": margin.to_string(),
                 "liquidation_price": liquidation_price.to_string(),
                 "cumulative_funding_entry": cumulative_funding_entry.to_string(),
+                "market_funding": market_cumulative_funding.to_string(),
                 "mark_price": mark_price.to_string(),
                 "is_liquidatable": is_liquidatable,
                 "block_height": block_height.to_string(),
@@ -588,6 +597,7 @@ impl RedisProcessor {
 
         Ok(())
     }
+
     // Process non-market messages
     async fn process_non_market_message(
         &self,
@@ -636,12 +646,6 @@ impl RedisProcessor {
             } else {
                 // Fallback: try manual deserialization if payload variant doesn't match
                 error!("Message type is ExchangePosition but payload isn't ExchangePositions!");
-
-                // Print the raw payload for debugging
-                info!(
-                    "Raw payload for position message: {}",
-                    serde_json::to_string(&message.payload).unwrap_or_default()
-                );
 
                 // Attempt manual deserialization
                 match serde_json::from_value::<Vec<PositionPayload>>(
@@ -771,10 +775,6 @@ impl MessageProcessor for RedisProcessor {
         info!(
             "DEBUG-1: Processing message type {:?} with phase {:?}",
             msg_type, phase
-        );
-        info!(
-            "Raw message payload: {}",
-            serde_json::to_string(&message.payload).unwrap_or_default()
         );
 
         match msg_type {

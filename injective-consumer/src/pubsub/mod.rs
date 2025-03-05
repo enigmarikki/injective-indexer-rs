@@ -29,6 +29,11 @@ pub struct StreamEvent {
     pub timestamp: u64,
     pub payload: serde_json::Value,
 }
+#[derive(Clone)]
+pub enum SerializationProtocol {
+    Bincode,
+    Json,
+}
 
 // Configuration for Redis PubSub
 #[derive(Clone)]
@@ -37,7 +42,7 @@ pub struct RedisPubSubConfig {
     pub connection_pool_size: usize,
     pub sharded_channels: bool,
     pub channel_prefix: String,
-    pub binary_protocol: bool,
+    pub protocol: SerializationProtocol,
     pub metrics_interval_secs: u64,
     pub publisher_queue_size: usize,
     pub publisher_workers: usize,
@@ -50,7 +55,7 @@ impl Default for RedisPubSubConfig {
             connection_pool_size: 32, // Dragonfly can handle many connections efficiently
             sharded_channels: true,   // Use multiple channels for better throughput
             channel_prefix: "inj:exchange".to_string(),
-            binary_protocol: true, // Use binary for better performance
+            protocol: SerializationProtocol::Json, // Default protocol
             metrics_interval_secs: 10,
             publisher_queue_size: 10000, // Large queue for handling spikes
             publisher_workers: 8,        // Multiple publisher workers
@@ -80,7 +85,6 @@ pub struct RedisPubSubService {
 
 impl RedisPubSubService {
     pub async fn new(config: RedisPubSubConfig) -> Result<Self, Box<dyn Error + Send + Sync>> {
-        // Fixed: Removed the & reference to string
         let client = Client::open(config.redis_url.clone())?;
 
         // Create connection pool for publishers
@@ -117,7 +121,6 @@ impl RedisPubSubService {
         let metrics = self.metrics.clone();
         let worker_count = self.config.publisher_workers;
 
-        // Using a multi-producer single-consumer approach for better reliability
         let rx = Arc::new(Mutex::new(rx));
 
         for i in 0..worker_count {
@@ -125,18 +128,15 @@ impl RedisPubSubService {
             let metrics = metrics.clone();
             let rx = rx.clone();
 
-            // Spawn dedicated worker
             task::spawn(async move {
                 info!("Starting Redis publisher worker #{}", i);
 
                 loop {
-                    // Get a message from the shared queue
                     let message = {
                         let mut rx_lock = rx.lock().await;
                         match rx_lock.recv().await {
                             Some(msg) => msg,
                             None => {
-                                // Channel closed, exit worker
                                 debug!("Publisher queue closed, exiting worker #{}", i);
                                 break;
                             }
@@ -146,7 +146,6 @@ impl RedisPubSubService {
                     let (channel, payload) = message;
                     let start_time = Instant::now();
 
-                    // Get a connection from the pool
                     let conn_result = {
                         let mut conn_guard = connections.lock().await;
                         if conn_guard.is_empty() {
@@ -156,28 +155,23 @@ impl RedisPubSubService {
                                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                             None
                         } else {
-                            // Take a connection from the pool
                             Some(conn_guard.pop().unwrap())
                         }
                     };
 
                     if let Some(mut conn) = conn_result {
-                        // Publish the message
                         let result: RedisResult<()> = conn.publish(&channel, payload.clone()).await;
 
-                        // Return connection to pool
                         {
                             let mut conn_guard = connections.lock().await;
                             conn_guard.push(conn);
                         }
 
-                        // Update metrics
                         if result.is_ok() {
                             metrics
                                 .messages_published
                                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
-                            // Update timing metrics
                             let elapsed_us = start_time.elapsed().as_micros() as u64;
                             let current_avg = metrics
                                 .avg_publish_time_us
@@ -185,13 +179,12 @@ impl RedisPubSubService {
                             let new_avg = if current_avg == 0 {
                                 elapsed_us
                             } else {
-                                (current_avg * 9 + elapsed_us) / 10 // Exponential moving average
+                                (current_avg * 9 + elapsed_us) / 10
                             };
                             metrics
                                 .avg_publish_time_us
                                 .store(new_avg, std::sync::atomic::Ordering::Relaxed);
 
-                            // Update max time if applicable
                             let current_max = metrics
                                 .max_publish_time_us
                                 .load(std::sync::atomic::Ordering::Relaxed);
@@ -248,13 +241,10 @@ impl RedisPubSubService {
     }
 
     // Get a channel name based on event type
-    // Use this method to ensure consistent channel naming
     pub fn get_channel_for_event(&self, event_type: EventType) -> String {
         if self.config.sharded_channels {
-            // Use dedicated channel per event type for better throughput
             format!("{}:{:?}", self.config.channel_prefix, event_type)
         } else {
-            // Use single channel for all events
             self.config.channel_prefix.clone()
         }
     }
@@ -266,13 +256,10 @@ impl RedisPubSubService {
     ) -> Result<(), Box<dyn Error + Send + Sync>> {
         let channel = self.get_channel_for_event(event.event_type);
 
-        // Serialize based on protocol choice
-        let payload = if self.config.binary_protocol {
-            // For maximum performance, we use bincode instead of JSON
-            bincode::serialize(&event)?
-        } else {
-            // JSON for compatibility
-            serde_json::to_vec(&event)?
+        // Serialize based on protocol choice using a match on self.config.protocol.
+        let payload = match self.config.protocol {
+            SerializationProtocol::Bincode => bincode::serialize(&event)?,
+            SerializationProtocol::Json => serde_json::to_vec(&event)?,
         };
 
         // Update queue depth metric
@@ -280,11 +267,8 @@ impl RedisPubSubService {
             .queue_depth
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
-        // Send to publishing queue
-        // Better error handling for send operation
         match self.pub_queue.send((channel, payload)).await {
             Ok(_) => {
-                // Update queue depth metric after successful send
                 self.metrics
                     .queue_depth
                     .fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
@@ -311,9 +295,7 @@ impl RedisPubSubService {
             return Ok(());
         }
 
-        // Group events by channel for efficient publishing
         let mut channel_events: HashMap<String, Vec<StreamEvent>> = HashMap::new();
-
         for event in events {
             let channel = self.get_channel_for_event(event.event_type);
             channel_events
@@ -322,27 +304,20 @@ impl RedisPubSubService {
                 .push(event);
         }
 
-        // Convert to parallel futures
         let mut publish_futures = Vec::new();
 
         for (channel, events) in channel_events {
-            // Create one combined payload for each channel
-            let payload = if self.config.binary_protocol {
-                bincode::serialize(&events)?
-            } else {
-                serde_json::to_vec(&events)?
+            let payload = match self.config.protocol {
+                SerializationProtocol::Bincode => bincode::serialize(&events)?,
+                SerializationProtocol::Json => serde_json::to_vec(&events)?,
             };
 
-            // Update queue metric
             self.metrics
                 .queue_depth
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
-            // Clone queue for async move
             let queue = self.pub_queue.clone();
             let metrics = self.metrics.clone();
-
-            // Create publish future
             let future = async move {
                 let result = queue.send((channel, payload)).await;
                 metrics
@@ -350,14 +325,11 @@ impl RedisPubSubService {
                     .fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
                 result
             };
-
             publish_futures.push(future);
         }
 
-        // Execute all publishes in parallel
         let results = join_all(publish_futures).await;
 
-        // Check for errors
         for result in results {
             if result.is_err() {
                 self.metrics
