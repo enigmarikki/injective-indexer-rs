@@ -212,7 +212,7 @@ async fn process_stream_response(
 
     if !messages.is_empty() {
         // Send to Kafka in a batch
-        let results = producer.send_batch(messages).await;
+        let results = producer.send_batch_low_latency(messages).await;
 
         // Log errors if any
         for (i, result) in results.iter().enumerate() {
@@ -221,7 +221,7 @@ async fn process_stream_response(
             }
         }
 
-        let success_count = results.iter().filter(|r| r.is_ok()).count();
+        let success_count = results.iter().filter(|r: &&Result<(), rdkafka::error::KafkaError>| r.is_ok()).count();
         info!(
             "Successfully sent {}/{} messages to Kafka",
             success_count,

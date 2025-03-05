@@ -29,7 +29,7 @@ pub enum MessageType {
     DerivativeMarket,
     ExchangeBalance,
     ExchangePosition,
-    DerivativeL3Orderbook,
+    DerivativeFullOrderbook,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -48,7 +48,7 @@ pub enum KafkaPayload {
     DerivativeMarkets(Vec<DerivativeMarketPayload>),
     ExchangePositions(Vec<PositionPayload>),
     ExchangeBalances(Vec<ExchangeBalancePayload>),
-    DerivativeL3Orderbooks(Vec<OrderbookL3Payload>),
+    DerivativeFullOrderbooks(Vec<FullLimitOrderbookPayload>),
 }
 
 // Custom serializable structs for each message type
@@ -196,7 +196,7 @@ pub struct DerivativeMarketPayload {
     pub hir: String,
     pub funding_interval: String,
     pub cumulative_funding: String,
-    pub cumulative_price : String
+    pub cumulative_price: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -208,7 +208,7 @@ pub struct ExchangeBalancePayload {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct OrderbookL3Payload {
+pub struct FullLimitOrderbookPayload{
     pub market_id: String,
     pub bids: Vec<TrimmedLimitOrderPayload>,
     pub asks: Vec<TrimmedLimitOrderPayload>,

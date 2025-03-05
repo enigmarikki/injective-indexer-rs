@@ -1,9 +1,10 @@
 use crate::config::GrpcConfig;
+use crate::proto::injective::exchange::v1beta1::full_derivative_market::Info;
 use crate::proto::injective::exchange::v1beta1::query_client::QueryClient;
 use crate::proto::injective::exchange::v1beta1::{
-    DerivativePosition, FullDerivativeMarket, QueryDerivativeMarketsRequest,QueryExchangeBalancesRequest, QueryPositionsRequest
+    DerivativePosition, FullDerivativeMarket, QueryDerivativeMarketsRequest,
+    QueryExchangeBalancesRequest, QueryPositionsRequest,
 };
-use crate::proto::injective::exchange::v1beta1::full_derivative_market::Info;
 use log::{debug, error, info};
 use std::error::Error;
 use tokio::time::{interval, Duration};
@@ -32,7 +33,7 @@ impl ExchangeQueryClient {
         // Assuming format "http://host:port" and we want to connect to port 36657
         let parsed_url = url::Url::parse(&config.query_endpoint)?;
         let host = parsed_url.host_str().unwrap_or("localhost");
-        let tendermint_rpc_endpoint = format!("http://{}:36657", host);
+        let tendermint_rpc_endpoint = format!("http://{}:26657", host);
         debug!("Using Tendermint RPC endpoint: {}", tendermint_rpc_endpoint);
 
         Ok(Self {
@@ -271,7 +272,7 @@ impl ExchangeHeartbeat {
 
         // Send to Kafka
         if !messages.is_empty() {
-            let results = self.producer.send_batch(messages).await;
+            let results = self.producer.send_batch_low_latency(messages).await;
             let success_count = results.iter().filter(|r| r.is_ok()).count();
             info!(
                 "Sent {}/{} derivative markets to Kafka at block height {}",
@@ -305,7 +306,7 @@ impl ExchangeHeartbeat {
 
         // Send to Kafka
         if !messages.is_empty() {
-            let results = self.producer.send_batch(messages).await;
+            let results = self.producer.send_batch_low_latency(messages).await;
             let success_count = results.iter().filter(|r| r.is_ok()).count();
             info!(
                 "Sent {}/{} positions to Kafka at block height {}",
@@ -339,7 +340,7 @@ impl ExchangeHeartbeat {
 
         // Send to Kafka
         if !messages.is_empty() {
-            let results = self.producer.send_batch(messages).await;
+            let results = self.producer.send_batch_low_latency(messages).await;
             let success_count = results.iter().filter(|r| r.is_ok()).count();
             info!(
                 "Sent {}/{} exchange balances to Kafka at block height {}",
@@ -360,11 +361,11 @@ impl ExchangeHeartbeat {
     ) -> Result<(), Box<dyn Error + Send + Sync>> {
         // Convert to Kafka message format
         let message = crate::models::KafkaMessage {
-            message_type: crate::models::MessageType::DerivativeL3Orderbook,
+            message_type: crate::models::MessageType::DerivativeFullOrderbook,
             block_height: block_height,
             block_time: chrono::Utc::now().timestamp_millis() as u64,
-            payload: crate::models::KafkaPayload::DerivativeL3Orderbooks(vec![
-                crate::models::OrderbookL3Payload {
+            payload: crate::models::KafkaPayload::DerivativeFullOrderbooks(vec![
+                crate::models::FullLimitOrderbookPayload {
                     market_id: market_id.to_string(),
                     bids: orderbook
                         .bids
@@ -382,7 +383,7 @@ impl ExchangeHeartbeat {
         };
 
         // Send to Kafka
-        let results = self.producer.send_batch(vec![message]).await;
+        let results = self.producer.send_batch_low_latency(vec![message]).await;
         if let Some(Err(e)) = results.first() {
             error!("Failed to send orderbook to Kafka: {}", e);
         } else {
@@ -401,17 +402,17 @@ impl ExchangeHeartbeat {
     ) -> crate::models::DerivativeMarketPayload {
         // Extract market details
         let market_data = market.market.unwrap_or_default();
-        
+
         // Extract perpetual market state
         let perp_state = match &market.info {
             Some(Info::PerpetualInfo(state)) => Some(state),
             _ => None,
         };
-        
+
         // Extract market_info and funding_info separately
         let market_info = perp_state.and_then(|state| state.market_info.as_ref());
         let funding_info = perp_state.and_then(|state| state.funding_info.as_ref());
-    
+
         crate::models::DerivativeMarketPayload {
             market_id: market_data.market_id,
             ticker: market_data.ticker,
@@ -425,22 +426,32 @@ impl ExchangeHeartbeat {
             is_perpetual: market_data.is_perpetual,
             status: self.map_market_status(market_data.status),
             mark_price: market.mark_price,
-            
+
             min_price_tick: market_data.min_price_tick_size,
             min_quantity_tick: market_data.min_quantity_tick_size,
             min_notional: market_data.min_notional,
-            
+
             // Get fields from market_info
-            hfr: market_info.map(|info| info.hourly_funding_rate_cap.clone()).unwrap_or_default(),
-            hir: market_info.map(|info| info.hourly_interest_rate.clone()).unwrap_or_default(),
-            funding_interval: market_info.map(|info| info.funding_interval.to_string()).unwrap_or_default(),
-            
+            hfr: market_info
+                .map(|info| info.hourly_funding_rate_cap.clone())
+                .unwrap_or_default(),
+            hir: market_info
+                .map(|info| info.hourly_interest_rate.clone())
+                .unwrap_or_default(),
+            funding_interval: market_info
+                .map(|info| info.funding_interval.to_string())
+                .unwrap_or_default(),
+
             // Get fields from funding_info
-            cumulative_funding: funding_info.map(|info| info.cumulative_funding.clone()).unwrap_or_default(),
-            cumulative_price: funding_info.map(|info| info.cumulative_price.clone()).unwrap_or_default(),
+            cumulative_funding: funding_info
+                .map(|info| info.cumulative_funding.clone())
+                .unwrap_or_default(),
+            cumulative_price: funding_info
+                .map(|info| info.cumulative_price.clone())
+                .unwrap_or_default(),
         }
     }
-    
+
     fn map_market_status(&self, status: i32) -> String {
         match status {
             1 => "Active".to_string(),

@@ -52,7 +52,7 @@ pub enum MessageType {
     DerivativeMarket,
     ExchangeBalance,
     ExchangePosition,
-    DerivativeL3Orderbook,
+    DerivativeFullOrderbook,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -71,7 +71,7 @@ pub enum KafkaPayload {
     DerivativeMarkets(Vec<DerivativeMarketPayload>),
     ExchangePositions(Vec<PositionPayload>),
     ExchangeBalances(Vec<ExchangeBalancePayload>),
-    DerivativeL3Orderbooks(Vec<OrderbookL3Payload>),
+    DerivativeFullOrderbooks(Vec<OrderbookL3Payload>),
 }
 
 // Custom serializable structs for each message type

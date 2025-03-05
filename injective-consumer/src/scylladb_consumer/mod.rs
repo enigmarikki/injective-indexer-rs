@@ -407,28 +407,6 @@ impl ScyllaDBProcessor {
         Ok(())
     }
 
-    pub async fn get_liquidatable_positions(
-        &self,
-    ) -> Result<Vec<(String, String, f64, f64)>, Box<dyn Error + Send + Sync>> {
-        let query = "SELECT market_id, subaccount_id, liquidation_price, mark_price FROM injective.liquidatable_positions";
-        let result = self.session.query_unpaged(query, &[]).await.map_err(|e| {
-            error!("Failed to query liquidatable positions: {}", e);
-            e
-        })?;
-        let mut positions = Vec::new();
-        let rows_result = result.into_rows_result().map_err(|e| {
-            error!("Failed to convert query result into rows: {}", e);
-            e
-        })?;
-        let mut rows_iter = rows_result.rows::<(String, String, String, String)>()?;
-        while let Some(row) = rows_iter.next().transpose()? {
-            let (market_id, subaccount_id, liq_price_str, mark_price_str) = row;
-            let liquidation_price = liq_price_str.parse::<f64>().unwrap_or(0.0);
-            let mark_price = mark_price_str.parse::<f64>().unwrap_or(0.0);
-            positions.push((market_id, subaccount_id, liquidation_price, mark_price));
-        }
-        Ok(positions)
-    }
 }
 
 #[async_trait]

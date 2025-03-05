@@ -12,11 +12,14 @@ mod consumer;
 mod models;
 mod redis_consumer;
 mod scylladb_consumer;
+mod pubsub;
 
 use config::Config;
 use consumer::KafkaConsumer;
 use redis_consumer::RedisProcessor;
 use scylladb_consumer::ScyllaDBProcessor;
+use pubsub::{RedisPubSubConfig, RedisPubSubService};
+use std::sync::Arc;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
@@ -41,16 +44,35 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
 
     info!("Configuration loaded");
 
-    // Initialize Redis processor
+    // Initialize Redis PubSub service
+    info!("Initializing Redis PubSub service");
+    let pubsub_config = RedisPubSubConfig {
+        redis_url: redis_url.clone(),
+        // Customize other options as needed
+        ..RedisPubSubConfig::default()
+    };
+
+    let pubsub_service = match RedisPubSubService::new(pubsub_config).await {
+        Ok(service) => {
+            info!("Redis PubSub service initialized");
+            Arc::new(service)
+        },
+        Err(e) => {
+            error!("Failed to initialize Redis PubSub service: {}", e);
+            return Err(e.into());
+        }
+    };
+
+    // Initialize Redis processor with PubSub service
     info!("Connecting to Redis at {}", redis_url);
     let redis_processor = match RedisProcessor::new(&redis_url) {
         Ok(processor) => {
             info!("Connected to Redis: {}", redis_url);
-            processor
+            processor.with_pubsub(pubsub_service.clone()) // Add PubSub service here
         }
         Err(e) => {
             error!("Failed to connect to Redis: {}", e);
-            return Err(e);
+            return Err(e.into());
         }
     };
 
@@ -63,7 +85,7 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
         }
         Err(e) => {
             error!("Failed to connect to ScyllaDB: {}", e);
-            return Err(e);
+            return Err(e.into());
         }
     };
 
@@ -83,7 +105,7 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
         Ok(consumer) => consumer,
         Err(e) => {
             error!("Failed to create Redis consumer: {}", e);
-            return Err(Box::new(e));
+            return Err(e.into());
         }
     };
 
@@ -96,7 +118,7 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
         Ok(consumer) => consumer,
         Err(e) => {
             error!("Failed to create ScyllaDB consumer: {}", e);
-            return Err(Box::new(e));
+            return Err(e.into());
         }
     };
 
