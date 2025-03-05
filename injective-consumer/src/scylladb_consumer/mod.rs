@@ -406,7 +406,6 @@ impl ScyllaDBProcessor {
 
         Ok(())
     }
-
 }
 
 #[async_trait]

@@ -1,12 +1,10 @@
-use async_trait::async_trait;
-use futures::{future::join_all, StreamExt};
+use futures::future::join_all;
 use log::{debug, error, info, warn};
+use redis::{aio::ConnectionManager, AsyncCommands, Client, RedisResult};
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::error::Error;
 use std::sync::Arc;
-// Fixed: Removed unused Commands import
-use redis::{aio::ConnectionManager, AsyncCommands, Client, RedisResult};
-use serde::{Deserialize, Serialize};
 use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, Mutex};
 use tokio::{task, time};
@@ -21,6 +19,7 @@ pub enum EventType {
     PriceUpdate = 3,
     OrderbookUpdate = 4,
     TradeUpdate = 5,
+    SystemEvent = 6,
 }
 
 // Stream event
@@ -38,7 +37,6 @@ pub struct RedisPubSubConfig {
     pub connection_pool_size: usize,
     pub sharded_channels: bool,
     pub channel_prefix: String,
-    pub pattern_subscribe: bool,
     pub binary_protocol: bool,
     pub metrics_interval_secs: u64,
     pub publisher_queue_size: usize,
@@ -52,8 +50,7 @@ impl Default for RedisPubSubConfig {
             connection_pool_size: 32, // Dragonfly can handle many connections efficiently
             sharded_channels: true,   // Use multiple channels for better throughput
             channel_prefix: "inj:exchange".to_string(),
-            pattern_subscribe: false, // Pattern subscribe is slower, avoid unless needed
-            binary_protocol: true,    // Use binary for better performance
+            binary_protocol: true, // Use binary for better performance
             metrics_interval_secs: 10,
             publisher_queue_size: 10000, // Large queue for handling spikes
             publisher_workers: 8,        // Multiple publisher workers
@@ -74,7 +71,6 @@ pub struct PubSubMetrics {
 // The main Redis PubSub service optimized for Dragonfly
 pub struct RedisPubSubService {
     config: RedisPubSubConfig,
-    client: Client,
     // Connection pool for publishers
     pub_connections: Arc<Mutex<Vec<ConnectionManager>>>,
     // Queue for publishing messages
@@ -101,7 +97,6 @@ impl RedisPubSubService {
 
         let service = RedisPubSubService {
             config: config.clone(),
-            client,
             pub_connections: Arc::new(Mutex::new(connections)),
             pub_queue: tx,
             metrics: metrics.clone(),
@@ -264,18 +259,6 @@ impl RedisPubSubService {
         }
     }
 
-    // Get a channel for market-specific events if sharding by market
-    pub fn get_channel_for_market(&self, event_type: EventType, market_id: &str) -> String {
-        if self.config.sharded_channels {
-            format!(
-                "{}:{}:{}",
-                self.config.channel_prefix, market_id, event_type as u8
-            )
-        } else {
-            self.get_channel_for_event(event_type)
-        }
-    }
-
     // High-performance publish method
     pub async fn publish_event(
         &self,
@@ -387,14 +370,6 @@ impl RedisPubSubService {
         Ok(())
     }
 
-    // Create a subscriber for a specific event type
-    pub async fn create_subscriber(
-        &self,
-        event_types: Vec<EventType>,
-    ) -> Result<RedisPubSubSubscriber, Box<dyn Error + Send + Sync>> {
-        RedisPubSubSubscriber::new(self.client.clone(), event_types, self.config.clone()).await
-    }
-
     // Helper methods to create common event types
     pub fn create_market_update(&self, market_id: &str, data: serde_json::Value) -> StreamEvent {
         StreamEvent {
@@ -433,189 +408,5 @@ impl RedisPubSubService {
                 "data": data
             }),
         }
-    }
-}
-
-// Subscriber for Redis PubSub
-pub struct RedisPubSubSubscriber {
-    client: Client,
-    event_types: Vec<EventType>,
-    config: RedisPubSubConfig,
-    rx: mpsc::Receiver<StreamEvent>,
-}
-
-impl RedisPubSubSubscriber {
-    pub async fn new(
-        client: Client,
-        event_types: Vec<EventType>,
-        config: RedisPubSubConfig,
-    ) -> Result<Self, Box<dyn Error + Send + Sync>> {
-        let (tx, rx) = mpsc::channel(2000);
-
-        // Clone what we need for async closure
-        let client_clone = client.clone();
-        let event_types_clone = event_types.clone();
-        let config_clone = config.clone();
-
-        // Spawn subscriber task
-        task::spawn(async move {
-            Self::run_subscriber(client_clone, event_types_clone, tx, config_clone).await;
-        });
-
-        Ok(RedisPubSubSubscriber {
-            client,
-            event_types,
-            config,
-            rx,
-        })
-    }
-
-    // Main subscriber loop
-    async fn run_subscriber(
-        client: Client,
-        event_types: Vec<EventType>,
-        tx: mpsc::Sender<StreamEvent>,
-        config: RedisPubSubConfig,
-    ) {
-        // Added retry logic for connection failures
-        let mut retry_count = 0;
-        let max_retries = 5;
-        let mut retry_delay = Duration::from_millis(100);
-
-        'connection_loop: loop {
-            // Create pubsub connection
-            match client.get_async_connection().await {
-                Ok(conn) => {
-                    // Reset retry counters on successful connection
-                    retry_count = 0;
-                    retry_delay = Duration::from_millis(100);
-
-                    let mut pubsub = conn.into_pubsub();
-
-                    // Subscribe to required channels
-                    let mut channels = Vec::new();
-
-                    if config.sharded_channels {
-                        // Subscribe to specific channels for each event type
-                        for event_type in &event_types {
-                            let channel = format!("{}:{:?}", config.channel_prefix, event_type);
-                            channels.push(channel);
-                        }
-                    } else {
-                        // Subscribe to single channel for all events
-                        channels.push(config.channel_prefix.clone());
-                    }
-
-                    // Subscribe to channels
-                    let mut subscription_failed = false;
-                    for channel in &channels {
-                        if let Err(e) = pubsub.subscribe(channel).await {
-                            error!("Error subscribing to channel {}: {}", channel, e);
-                            subscription_failed = true;
-                            break;
-                        }
-                        info!("Subscribed to Redis channel: {}", channel);
-                    }
-
-                    if subscription_failed {
-                        // Try to reconnect if subscription failed
-                        retry_count += 1;
-                        if retry_count >= max_retries {
-                            error!(
-                                "Failed to subscribe after {} retries, giving up",
-                                max_retries
-                            );
-                            break 'connection_loop;
-                        }
-
-                        time::sleep(retry_delay).await;
-                        retry_delay = std::cmp::min(retry_delay * 2, Duration::from_secs(5));
-                        continue 'connection_loop;
-                    }
-
-                    // Process messages
-                    let mut msg_stream = pubsub.on_message();
-
-                    while let Some(msg) = msg_stream.next().await {
-                        let payload: Vec<u8> = match msg.get_payload() {
-                            Ok(payload) => payload,
-                            Err(e) => {
-                                error!("Error getting payload: {}", e);
-                                continue;
-                            }
-                        };
-
-                        // Parse the message
-                        let event: StreamEvent = if config.binary_protocol {
-                            match bincode::deserialize(&payload) {
-                                Ok(event) => event,
-                                Err(e) => {
-                                    error!("Error deserializing binary event: {}", e);
-                                    continue;
-                                }
-                            }
-                        } else {
-                            match serde_json::from_slice(&payload) {
-                                Ok(event) => event,
-                                Err(e) => {
-                                    error!("Error deserializing JSON event: {}", e);
-                                    continue;
-                                }
-                            }
-                        };
-
-                        // Check if we're interested in this event type
-                        if !config.sharded_channels || event_types.contains(&event.event_type) {
-                            // Handle backpressure with try_send
-                            match tx.try_send(event) {
-                                Ok(_) => {} // Successfully sent
-                                Err(mpsc::error::TrySendError::Full(_)) => {
-                                    // Channel full, log warning
-                                    warn!("Subscriber channel full, dropping message");
-                                }
-                                Err(mpsc::error::TrySendError::Closed(_)) => {
-                                    // Channel closed, exit loop
-                                    debug!("Subscriber channel closed, exiting");
-                                    break 'connection_loop;
-                                }
-                            }
-                        }
-                    }
-
-                    // If we get here, the connection was dropped - try to reconnect
-                    warn!("Redis PubSub connection dropped, attempting to reconnect");
-                    time::sleep(Duration::from_millis(100)).await;
-                }
-                Err(e) => {
-                    error!("Error creating pubsub connection: {}", e);
-
-                    // Implement retry with exponential backoff
-                    retry_count += 1;
-                    if retry_count >= max_retries {
-                        error!("Failed to connect after {} retries, giving up", max_retries);
-                        break 'connection_loop;
-                    }
-
-                    warn!(
-                        "Retrying connection in {:?} (attempt {}/{})",
-                        retry_delay, retry_count, max_retries
-                    );
-                    time::sleep(retry_delay).await;
-                    retry_delay = std::cmp::min(retry_delay * 2, Duration::from_secs(5));
-                }
-            }
-        }
-
-        info!("Redis PubSub subscriber task exiting");
-    }
-
-    // Get the next event
-    pub async fn next_event(&mut self) -> Option<StreamEvent> {
-        self.rx.recv().await
-    }
-
-    // Convert to a stream for easier consumption
-    pub fn into_stream(self) -> impl futures::Stream<Item = StreamEvent> {
-        tokio_stream::wrappers::ReceiverStream::new(self.rx)
     }
 }

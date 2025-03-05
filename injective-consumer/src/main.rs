@@ -5,20 +5,23 @@ use std::error::Error;
 use tokio::signal::ctrl_c;
 use tokio::sync::oneshot;
 use tokio::task;
+use tokio::time::{sleep, Duration};
 
 mod compute;
 mod config;
 mod consumer;
+mod market_preloader;
 mod models;
+mod pubsub;
 mod redis_consumer;
 mod scylladb_consumer;
-mod pubsub;
 
 use config::Config;
 use consumer::KafkaConsumer;
+use market_preloader::MarketPreloader;
+use pubsub::{RedisPubSubConfig, RedisPubSubService};
 use redis_consumer::RedisProcessor;
 use scylladb_consumer::ScyllaDBProcessor;
-use pubsub::{RedisPubSubConfig, RedisPubSubService};
 use std::sync::Arc;
 
 #[tokio::main]
@@ -56,7 +59,7 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
         Ok(service) => {
             info!("Redis PubSub service initialized");
             Arc::new(service)
-        },
+        }
         Err(e) => {
             error!("Failed to initialize Redis PubSub service: {}", e);
             return Err(e.into());
@@ -89,12 +92,31 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
         }
     };
 
-    // Create separate Kafka configs for Redis and ScyllaDB consumers
+    // Create a dedicated market preloader
+    let market_preloader = MarketPreloader::new(&redis_url, pubsub_service.clone()).await?;
+
+    // Create separate Kafka configs for market preloader, Redis, and ScyllaDB consumers
+    let mut market_kafka_config = config.kafka.clone();
+    market_kafka_config.consumer_group = format!("{}-markets", config.kafka.consumer_group);
+
     let mut redis_kafka_config = config.kafka.clone();
     redis_kafka_config.consumer_group = format!("{}-redis", config.kafka.consumer_group);
 
     let mut scylladb_kafka_config = config.kafka.clone();
     scylladb_kafka_config.consumer_group = format!("{}-scylladb", config.kafka.consumer_group);
+
+    // Create market preloader consumer with its own consumer group
+    info!(
+        "Creating Market Preloader Kafka consumer with group: {}",
+        market_kafka_config.consumer_group
+    );
+    let market_consumer = match KafkaConsumer::new(&market_kafka_config, market_preloader) {
+        Ok(consumer) => consumer,
+        Err(e) => {
+            error!("Failed to create Market Preloader consumer: {}", e);
+            return Err(e.into());
+        }
+    };
 
     // Create Redis consumer with its own consumer group
     info!(
@@ -123,11 +145,28 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
     };
 
     // Create shutdown channels
+    let (market_shutdown_tx, market_shutdown_rx) = oneshot::channel::<()>();
     let (redis_shutdown_tx, redis_shutdown_rx) = oneshot::channel::<()>();
     let (scylladb_shutdown_tx, scylladb_shutdown_rx) = oneshot::channel::<()>();
 
-    // Start consumers in separate tasks with shutdown receivers
-    info!("Starting consumers");
+    // Start market preloader first
+    info!("Starting market preloader");
+    let market_handle = task::spawn(async move {
+        if let Err(e) = market_consumer
+            .start_with_shutdown(market_shutdown_rx)
+            .await
+        {
+            error!("Market preloader error: {}", e);
+        }
+    });
+
+    // Allow time for market preloader to process initial markets
+    // This is a simple approach - ideally we'd want a signal from the preloader
+    info!("Waiting for initial market data to be processed...");
+    sleep(Duration::from_secs(5)).await;
+
+    // Start other consumers in separate tasks with shutdown receivers
+    info!("Starting Redis and ScyllaDB consumers");
     let redis_handle = task::spawn(async move {
         if let Err(e) = redis_consumer.start_with_shutdown(redis_shutdown_rx).await {
             error!("Redis consumer error: {}", e);
@@ -149,6 +188,12 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
             Ok(()) => {
                 info!("Received shutdown signal, stopping consumers...");
                 // Send shutdown signal to all consumers
+                if let Err(e) = market_shutdown_tx.send(()) {
+                    error!(
+                        "Failed to send shutdown signal to Market preloader: {:?}",
+                        e
+                    );
+                }
                 if let Err(e) = redis_shutdown_tx.send(()) {
                     error!("Failed to send shutdown signal to Redis consumer: {:?}", e);
                 }
@@ -166,7 +211,13 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
     });
 
     // Wait for all tasks to complete
-    let _ = join_all(vec![redis_handle, scylladb_handle, shutdown_handle]).await;
+    let _ = join_all(vec![
+        market_handle,
+        redis_handle,
+        scylladb_handle,
+        shutdown_handle,
+    ])
+    .await;
 
     info!("Application shutting down");
     Ok(())

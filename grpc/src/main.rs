@@ -114,9 +114,7 @@ fn create_stream_request() -> StreamRequest {
     let wild_card_match = vec!["*".to_string()];
 
     // Configure what data to receive
-    request.bank_balances_filter = Some(models::BankBalancesFilter {
-        accounts: wild_card_match.clone(), // Wildcard to match all accounts
-    });
+    request.bank_balances_filter = None;
 
     request.spot_trades_filter = Some(models::TradesFilter {
         market_ids: wild_card_match.clone(), // Wildcard to match all markets
@@ -150,11 +148,8 @@ fn create_stream_request() -> StreamRequest {
     request.subaccount_deposits_filter = Some(models::SubaccountDepositsFilter {
         subaccount_ids: wild_card_match.clone(),
     });
-
-    request.positions_filter = Some(models::PositionsFilter {
-        market_ids: wild_card_match.clone(),
-        subaccount_ids: wild_card_match.clone(),
-    });
+    // We're polling positions anyway so no need to do it again here
+    request.positions_filter = None;
 
     request.oracle_price_filter = Some(models::OraclePriceFilter {
         symbol: wild_card_match.clone(),

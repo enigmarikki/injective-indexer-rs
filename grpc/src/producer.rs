@@ -10,7 +10,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::Semaphore;
 const MAX_CONCURRENT_REQUESTS: usize = 100;
-const BATCH_SIZE: usize = 100; // Number of messages per batch
+const BATCH_SIZE: usize = 1000;
 
 pub struct BatchKafkaProducer {
     producer: Arc<FutureProducer>,
