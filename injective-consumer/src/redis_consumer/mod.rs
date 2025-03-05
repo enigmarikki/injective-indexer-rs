@@ -331,8 +331,6 @@ impl RedisProcessor {
                 event_type: EventType::PositionUpdate,
                 timestamp,
                 payload: serde_json::json!({
-                    "market_id": position.market_id.clone(),
-                    "subaccount_id": position.subaccount_id.clone(),
                     "data": position_data.clone()
                 }),
             };

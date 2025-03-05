@@ -1,0 +1,13 @@
+namespace Events;
+
+table StreamEvent {
+  event_type:ubyte;
+  timestamp:ulong;
+  payload:string;
+}
+
+table StreamEvents {
+  events:[StreamEvent];
+}
+
+root_type StreamEvent;  // For single events, and you can use StreamEvents as root for batches.
