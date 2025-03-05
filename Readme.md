@@ -26,30 +26,30 @@ graph TB
     
     subgraph "Consumer Services"
         mkt[Market Preloader]
-        redis[Redis Consumer]
+        dragonfly[dragonfly Consumer]
         scylla[ScyllaDB Consumer]
     end
     
     kafka --> |Market Data| mkt
-    kafka --> |Positions, Trades, Orderbooks| redis
+    kafka --> |Positions, Trades, Orderbooks| dragonfly
     kafka --> |Market & Position Data| scylla
     
-    mkt --> |Signal Markets Ready| redis
+    mkt --> |Signal Markets Ready| dragonfly
     mkt --> |Signal Markets Ready| scylla
     
     subgraph "Storage"
-        redisdb[(Redis)]
+        dragonflydb[(dragonfly)]
         scylladb[(ScyllaDB)]
     end
     
-    redis --> |Real-time State| redisdb
+    dragonfly --> |Real-time State| dragonflydb
     scylla --> |Historical Data| scylladb
     
     subgraph "Event Distribution"
-        pubsub[Redis PubSub]
+        pubsub[dragonfly PubSub]
     end
     
-    redis --> |Publish Updates| pubsub
+    dragonfly --> |Publish Updates| pubsub
     
     subgraph "Consumers"
         client1[Trading UI]
@@ -68,8 +68,8 @@ graph TB
     classDef client fill:#DDA0DD,stroke:#333,stroke-width:1px
     
     class inj,grpc,heart primary
-    class mkt,redis,scylla secondary
-    class redisdb,scylladb,pubsub storage
+    class mkt,dragonfly,scylla secondary
+    class dragonflydb,scylladb,pubsub storage
     class kafka broker
     class client1,client2,client3 client
 ```
@@ -87,11 +87,11 @@ graph TB
    - Prioritizes processing market data first
    - Establishes baseline reference data before processing positions
 
-2. **Redis Consumer**:
+2. **dragonfly Consumer**:
    - Maintains real-time state of markets and positions
    - Calculates liquidation prices
    - Identifies liquidatable positions
-   - Publishes updates via Redis PubSub
+   - Publishes updates via dragonfly PubSub
 
 3. **ScyllaDB Consumer**:
    - Stores historical market and position data
@@ -112,7 +112,7 @@ The system is built on a fully event-driven architecture:
    - Events trigger calculations like liquidation prices
 
 3. **Event Distribution**:
-   - Processed events are published to Redis PubSub
+   - Processed events are published to dragonfly PubSub
    - Consumers can subscribe to specific event types
    - Low-latency notification for critical events like liquidations
 
@@ -122,7 +122,7 @@ The system is built on a fully event-driven architecture:
    - Consumer components process data in phases:
      - Markets are processed first
      - Positions and other data follow
-   - Real-time updates are published via Redis PubSub
+   - Real-time updates are published via dragonfly PubSub
    - Historical data is stored in ScyllaDB
 
 ## Features
@@ -130,7 +130,7 @@ The system is built on a fully event-driven architecture:
 - Loosely coupled components for scalability
 - Phase-based processing to ensure data consistency
 - Optimized Kafka batching for high throughput
-- High-performance Redis PubSub for real-time updates
+- High-performance dragonfly PubSub for real-time updates
 - Accurate liquidation price calculation
 - Liquidation alerting system
 - Distributed processing with specialized consumers
@@ -143,7 +143,7 @@ GRPC_STREAM_ENDPOINT=http://injective-stream:1999
 GRPC_QUERY_ENDPOINT=http://injective-query:9900
 KAFKA_BROKERS=kafka1:9092,kafka2:9092
 KAFKA_TOPIC=injective-data
-REDIS_URL=redis://redis:6379
+DRAGONFLY_URL=dragonfly://dragonfly:6379
 SCYLLADB_NODES=scylla1:9042,scylla2:9042
 ```
 
@@ -159,7 +159,7 @@ This will start the entire stack including:
 - gRPC service
 - Consumer service
 - Kafka
-- Redis
+- Dragonfly
 - ScyllaDB
 
 Everything is configured to work together out of the box.
@@ -167,6 +167,6 @@ Everything is configured to work together out of the box.
 ## Requirements
 - Rust 1.73+
 - Kafka
-- Redis
+- dragonfly
 - ScyllaDB
 - Injective API access
