@@ -16,8 +16,8 @@ pub struct BatchKafkaProducer {
     producer: Arc<FutureProducer>,
     topic: String,
     request_limiter: Arc<Semaphore>,
+    latest_processed_block: Arc<std::sync::atomic::AtomicU64>,
 }
-
 impl BatchKafkaProducer {
     pub fn new(config: &KafkaConfig) -> Result<Self, KafkaError> {
         let producer = ClientConfig::new()
@@ -28,24 +28,74 @@ impl BatchKafkaProducer {
             .set("batch.size", "32768") // Optimal batch size for throughput
             .set("linger.ms", "0") // No delay for low latency
             .set("max.in.flight.requests.per.connection", "5")
-            .set("queue.buffering.max.messages", "5000000") // 1M messages in queue
-            .set("queue.buffering.max.kbytes", "2097152") // 1GB buffer
-            .set("socket.send.buffer.bytes", "1048576") // 1MB socket buffer
+            .set("queue.buffering.max.messages", "5000000")
+            .set("queue.buffering.max.kbytes", "2097152")
+            .set("socket.send.buffer.bytes", "1048576")
             .set("socket.receive.buffer.bytes", "1048576")
-            .set("message.send.max.retries", "2") // Fewer retries
-            .set("retry.backoff.ms", "1") // Minimal backoff
-            .set("acks", "1") // Balance reliability/performance
-            .set("delivery.timeout.ms", "30000") // 30s timeout
-            .set("request.timeout.ms", "1000") // 1s request timeout
+            .set("message.send.max.retries", "2")
+            .set("retry.backoff.ms", "1")
+            .set("acks", "1")
+            .set("delivery.timeout.ms", "30000")
+            .set("request.timeout.ms", "1000")
             .create()?;
 
         Ok(BatchKafkaProducer {
             producer: Arc::new(producer),
             topic: config.topic.clone(),
             request_limiter: Arc::new(Semaphore::new(MAX_CONCURRENT_REQUESTS)),
+            latest_processed_block: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         })
     }
+    pub fn update_latest_block(&self, block_height: u64) {
+        let current = self
+            .latest_processed_block
+            .load(std::sync::atomic::Ordering::Relaxed);
+        if block_height > current {
+            self.latest_processed_block
+                .store(block_height, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+    /// Get the latest processed block height
+    pub fn get_latest_block(&self) -> u64 {
+        self.latest_processed_block
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
 
+    /// Filter and send only messages from current or newer blocks
+    pub async fn send_batch_current_only(
+        &self,
+        messages: Vec<KafkaMessage>,
+    ) -> Vec<Result<(), KafkaError>> {
+        if messages.is_empty() {
+            return Vec::new();
+        }
+
+        // Get current latest block
+        let latest_block = self.get_latest_block();
+
+        // Filter messages to only include current or newer blocks
+        let filtered_messages: Vec<KafkaMessage> = messages
+            .into_iter()
+            .filter(|msg| {
+                // Always accept messages with higher block height
+                if msg.block_height > latest_block {
+                    // Update our latest block tracker
+                    self.update_latest_block(msg.block_height);
+                    return true;
+                }
+                // Only include messages from latest block
+                msg.block_height == latest_block
+            })
+            .collect();
+
+        // If no messages remain after filtering, return empty results
+        if filtered_messages.is_empty() {
+            return Vec::new();
+        }
+
+        // Process the filtered messages as normal
+        self.send_batch(filtered_messages).await
+    }
     /// Sends a batch of messages with extreme throughput optimization
     pub async fn send_batch(&self, messages: Vec<KafkaMessage>) -> Vec<Result<(), KafkaError>> {
         if messages.is_empty() {

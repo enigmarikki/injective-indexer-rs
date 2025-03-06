@@ -2,6 +2,7 @@ use futures::StreamExt;
 use log::{error, info};
 use std::env;
 use std::error::Error;
+use std::sync::Arc;
 use tokio::signal::ctrl_c;
 use tokio::task;
 
@@ -10,12 +11,14 @@ mod models;
 mod producer;
 mod proto;
 mod query_client;
+mod query_profiler;
 
 use config::Config;
 use models::{build_stream_request, StreamRequest, StreamResponse};
 use producer::BatchKafkaProducer;
 use proto::injective::stream::v1beta1::stream_client::StreamClient;
 use query_client::ExchangeHeartbeat;
+use query_profiler::create_profiled_exchange_heartbeat;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
@@ -35,27 +38,33 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
     // Create shutdown channel
     let (shutdown_tx, shutdown_rx) = tokio::sync::mpsc::channel::<()>(1);
 
-    // Clone config for heartbeat task
+    // Create Kafka producer for streaming service
+    let producer = Arc::new(BatchKafkaProducer::new(&config.kafka)?);
+    info!("Connected to Kafka: {}", config.kafka.brokers.join(","));
+
+    // Initialize with current block height
+    initialize_with_current_block(&producer, &config.grpc).await?;
+
+    // Clone config and producer for heartbeat task
     let heartbeat_config = config.clone();
+    let heartbeat_producer = Arc::clone(&producer);
 
     // Start the heartbeat service in a separate task
     let heartbeat_handle = task::spawn(async move {
-        match ExchangeHeartbeat::new(&heartbeat_config.grpc, &heartbeat_config.kafka, 30).await {
+        match query_profiler::create_profiled_exchange_heartbeat(&heartbeat_config.grpc, heartbeat_producer, 200)
+            .await
+        {
             Ok(mut heartbeat) => {
-                info!("Starting heartbeat service");
+                info!("Starting profiled heartbeat service");
                 if let Err(e) = heartbeat.start().await {
                     error!("Heartbeat service error: {}", e);
                 }
             }
             Err(e) => {
-                error!("Failed to create heartbeat service: {}", e);
+                error!("Failed to create profiled heartbeat service: {}", e);
             }
         }
     });
-
-    // Create Kafka producer for streaming service
-    let producer = BatchKafkaProducer::new(&config.kafka)?;
-    info!("Connected to Kafka: {}", config.kafka.brokers.join(","));
 
     // Create the streaming client
     let stream_client = connect_to_stream_service(&config.grpc.stream_endpoint).await?;
@@ -109,6 +118,28 @@ async fn connect_to_stream_service(
     Ok(client)
 }
 
+async fn initialize_with_current_block(
+    producer: &Arc<BatchKafkaProducer>,
+    config: &config::GrpcConfig,
+) -> Result<(), Box<dyn Error + Send + Sync>> {
+    // Create a temporary exchange client to get current block height
+    let exchange_client = query_client::ExchangeQueryClient::connect(config).await?;
+
+    // Get the current block height from the chain
+    match exchange_client.get_current_block_height().await {
+        Ok(height) => {
+            info!("Initializing with current block height: {}", height);
+            producer.update_latest_block(height);
+            Ok(())
+        }
+        Err(e) => {
+            error!("Failed to get initial block height: {}", e);
+            // Continue anyway, the system will self-correct
+            Ok(())
+        }
+    }
+}
+
 fn create_stream_request() -> StreamRequest {
     let mut request = build_stream_request();
     let wild_card_match = vec!["*".to_string()];
@@ -135,19 +166,11 @@ fn create_stream_request() -> StreamRequest {
         market_ids: wild_card_match.clone(),
     });
 
-    request.spot_orders_filter = Some(models::OrdersFilter {
-        market_ids: wild_card_match.clone(),
-        subaccount_ids: wild_card_match.clone(),
-    });
+    request.spot_orders_filter = None;
 
-    request.derivative_orders_filter = Some(models::OrdersFilter {
-        market_ids: wild_card_match.clone(),
-        subaccount_ids: wild_card_match.clone(),
-    });
+    request.derivative_orders_filter = None;
 
-    request.subaccount_deposits_filter = Some(models::SubaccountDepositsFilter {
-        subaccount_ids: wild_card_match.clone(),
-    });
+    request.subaccount_deposits_filter = None;
     // We're polling positions anyway so no need to do it again here
     request.positions_filter = None;
 
@@ -161,7 +184,7 @@ fn create_stream_request() -> StreamRequest {
 async fn stream_and_process(
     mut client: StreamClient<tonic::transport::Channel>,
     request: StreamRequest,
-    producer: BatchKafkaProducer,
+    producer: Arc<BatchKafkaProducer>,
     mut shutdown_rx: tokio::sync::mpsc::Receiver<()>,
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
     // Start streaming
@@ -178,7 +201,18 @@ async fn stream_and_process(
             message = stream.next() => {
                 match message {
                     Some(Ok(response)) => {
-                        process_stream_response(response, &producer).await?;
+                        // Check if this is a new block before processing
+                        let block_height = response.block_height;
+                        let current_block = producer.get_latest_block();
+
+                        if block_height >= current_block {
+                            // Only process if it's current or new
+                            process_stream_response(response, &producer).await?;
+                        } else {
+                            // Log that we're skipping old data
+                            info!("Skipping outdated block data: {} (current: {})",
+                                  block_height, current_block);
+                        }
                     }
                     Some(Err(e)) => {
                         error!("Error from stream: {}", e);
@@ -202,12 +236,17 @@ async fn process_stream_response(
     response: StreamResponse,
     producer: &BatchKafkaProducer,
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
-    // Convert to our Kafka messages
     let messages = Vec::<models::KafkaMessage>::from(response);
 
     if !messages.is_empty() {
-        // Send to Kafka in a batch
-        let results = producer.send_batch(messages).await;
+        let max_block_height = messages
+            .iter()
+            .map(|msg| msg.block_height)
+            .max()
+            .unwrap_or(0);
+        let latest_processed = producer.get_latest_block();
+
+        let results = producer.send_batch_current_only(messages).await;
 
         // Log errors if any
         for (i, result) in results.iter().enumerate() {
@@ -216,15 +255,26 @@ async fn process_stream_response(
             }
         }
 
-        let success_count = results
-            .iter()
-            .filter(|r: &&Result<(), rdkafka::error::KafkaError>| r.is_ok())
-            .count();
-        info!(
-            "Successfully sent {}/{} messages to Kafka",
-            success_count,
-            results.len()
-        );
+        let success_count = results.iter().filter(|r| r.is_ok()).count();
+
+        // Enhanced logging to show block height information
+        if success_count > 0 {
+            info!(
+                "Block height: {} (was {}). Sent {}/{} messages to Kafka",
+                max_block_height,
+                latest_processed,
+                success_count,
+                results.len()
+            );
+        } else if max_block_height < latest_processed {
+            // Log when we're skipping old blocks
+            info!(
+                "Skipped {} messages from old block height {} (current: {})",
+                results.len(),
+                max_block_height,
+                latest_processed
+            );
+        }
     }
 
     Ok(())

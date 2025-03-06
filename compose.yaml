@@ -11,8 +11,8 @@ services:
       kafka:
         condition: service_healthy
     environment:
-      - GRPC_STREAM_ENDPOINT=http://host.docker.internal:9999
-      - GRPC_QUERY_ENDPOINT=http://host.docker.internal:9900
+      - GRPC_STREAM_ENDPOINT=http://host.docker.internal:1999
+      - GRPC_QUERY_ENDPOINT=http://host.docker.internal:1900
       - KAFKA_BROKERS=kafka:9092
       - KAFKA_TOPIC=injective-data
       - KAFKA_CLIENT_ID=injective-client

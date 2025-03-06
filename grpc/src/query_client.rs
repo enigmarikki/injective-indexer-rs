@@ -18,24 +18,27 @@ pub struct ExchangeQueryClient {
 
 impl ExchangeQueryClient {
     pub async fn connect(config: &GrpcConfig) -> Result<Self, Box<dyn Error + Send + Sync>> {
+        // Set larger message size limit through environment variables
+        // These need to be set before creating the client
+        std::env::set_var("GRPC_ARG_MAX_RECEIVE_MESSAGE_LENGTH", "67108864"); // 64MB
+        std::env::set_var("GRPC_ARG_MAX_SEND_MESSAGE_LENGTH", "16777216");    // 16MB
+        
+        // Create normal client without interceptor
         let client = QueryClient::connect(config.query_endpoint.clone()).await?;
-        info!(
-            "Connected to exchange query service: {}",
-            config.query_endpoint
-        );
-
-        // Create a properly configured HTTP client
+        
+        info!("Connected to exchange query service: {}", config.query_endpoint);
+    
+        // Rest of your connect method...
         let http_client = reqwest::Client::builder()
             .timeout(Duration::from_secs(10))
             .build()?;
-
+    
         // Derive Tendermint RPC endpoint from query endpoint
-        // Assuming format "http://host:port" and we want to connect to port 36657
         let parsed_url = url::Url::parse(&config.query_endpoint)?;
         let host = parsed_url.host_str().unwrap_or("localhost");
         let tendermint_rpc_endpoint = format!("http://{}:26657", host);
         debug!("Using Tendermint RPC endpoint: {}", tendermint_rpc_endpoint);
-
+    
         Ok(Self {
             client,
             http_client,
@@ -141,9 +144,10 @@ impl ExchangeQueryClient {
 }
 
 // A heartbeat service that periodically fetches data from the exchange
+
 pub struct ExchangeHeartbeat {
     client: ExchangeQueryClient,
-    producer: crate::producer::BatchKafkaProducer,
+    producer: std::sync::Arc<crate::producer::BatchKafkaProducer>,
     interval_seconds: u64,
 }
 
@@ -154,7 +158,22 @@ impl ExchangeHeartbeat {
         interval_seconds: u64,
     ) -> Result<Self, Box<dyn Error + Send + Sync>> {
         let client = ExchangeQueryClient::connect(config).await?;
-        let producer = crate::producer::BatchKafkaProducer::new(kafka_config)?;
+        let producer = std::sync::Arc::new(crate::producer::BatchKafkaProducer::new(kafka_config)?);
+
+        Ok(Self {
+            client,
+            producer,
+            interval_seconds,
+        })
+    }
+
+    // Add the new method that accepts an Arc-wrapped producer
+    pub async fn new_with_producer(
+        config: &GrpcConfig,
+        producer: std::sync::Arc<crate::producer::BatchKafkaProducer>,
+        interval_seconds: u64,
+    ) -> Result<Self, Box<dyn Error + Send + Sync>> {
+        let client = ExchangeQueryClient::connect(config).await?;
 
         Ok(Self {
             client,
@@ -177,10 +196,16 @@ impl ExchangeHeartbeat {
 
             // Get current block height - fully async operation
             let block_height = match self.client.get_current_block_height().await {
-                Ok(height) => height,
+                Ok(height) => {
+                    // Update the producer with the latest block height
+                    info!("Current chain block height: {}", height);
+                    self.producer.update_latest_block(height);
+                    height
+                }
                 Err(e) => {
                     error!("Failed to get current block height: {}", e);
-                    0 // Fallback to 0 if we can't get the height
+                    // Use the existing latest height
+                    self.producer.get_latest_block()
                 }
             };
 
@@ -191,7 +216,7 @@ impl ExchangeHeartbeat {
                 .await
             {
                 Ok(markets) => {
-                    // Handle markets data and send to Kafka
+                    // Handle markets data and send to Kafka using the batch_current_only
                     self.process_derivative_markets(markets, block_height)
                         .await?;
                 }
@@ -212,16 +237,16 @@ impl ExchangeHeartbeat {
             }
 
             // Fetch exchange balances
-            match self.client.get_exchange_balances().await {
-                Ok(balances) => {
-                    // Handle balances data and send to Kafka
-                    self.process_exchange_balances(balances, block_height)
-                        .await?;
-                }
-                Err(e) => {
-                    error!("Failed to fetch exchange balances: {}", e);
-                }
-            }
+            // match self.client.get_exchange_balances().await {
+            //     Ok(balances) => {
+            //         // Handle balances data and send to Kafka
+            //         self.process_exchange_balances(balances, block_height)
+            //             .await?;
+            //     }
+            //     Err(e) => {
+            //         error!("Failed to fetch exchange balances: {}", e);
+            //     }
+            // }
 
             // Now fetch orderbooks for each active derivative market
             if let Ok(markets) = self
@@ -229,6 +254,8 @@ impl ExchangeHeartbeat {
                 .get_derivative_markets(Some("Active".to_string()))
                 .await
             {
+                let mut all_orderbooks = Vec::new();
+
                 for market in markets {
                     if let Some(market_data) = market.market {
                         if let Ok(orderbook) = self
@@ -236,51 +263,97 @@ impl ExchangeHeartbeat {
                             .get_full_derivative_orderbook(&market_data.market_id)
                             .await
                         {
-                            self.process_derivative_orderbook(
-                                &market_data.market_id,
-                                orderbook,
-                                block_height,
-                            )
-                            .await?;
+                            all_orderbooks.push((market_data.market_id.clone(), orderbook));
                         }
                     }
+                }
+
+                // Process all orderbooks in one batch
+                if !all_orderbooks.is_empty() {
+                    self.process_all_derivative_orderbooks(all_orderbooks, block_height)
+                        .await?;
                 }
             }
         }
     }
+    async fn process_all_derivative_orderbooks(
+        &self,
+        orderbooks: Vec<(
+            String,
+            crate::proto::injective::exchange::v1beta1::QueryFullDerivativeOrderbookResponse,
+        )>,
+        block_height: u64,
+    ) -> Result<(), Box<dyn Error + Send + Sync>> {
+        let orderbook_payloads: Vec<crate::models::FullLimitOrderbookPayload> = orderbooks
+            .into_iter()
+            .map(
+                |(market_id, orderbook)| crate::models::FullLimitOrderbookPayload {
+                    market_id,
+                    bids: orderbook
+                        .bids
+                        .into_iter()
+                        .map(|order| self.convert_limit_order(order))
+                        .collect(),
+                    asks: orderbook
+                        .asks
+                        .into_iter()
+                        .map(|order| self.convert_limit_order(order))
+                        .collect(),
+                    timestamp: chrono::Utc::now().timestamp_millis(),
+                },
+            )
+            .collect();
+        let length = orderbook_payloads.len();
+        // Single message with all orderbooks
+        let message = crate::models::KafkaMessage {
+            message_type: crate::models::MessageType::DerivativeFullOrderbook,
+            block_height,
+            block_time: chrono::Utc::now().timestamp_millis() as u64,
+            payload: crate::models::KafkaPayload::DerivativeFullOrderbooks(orderbook_payloads),
+        };
 
+        // Send the batch
+        let results = self.producer.send_batch_current_only(vec![message]).await;
+        let success = results.first().map_or(false, |r| r.is_ok());
+
+        info!(
+            "Sent {} orderbooks to Kafka as single batch at block height {}",
+            length, block_height
+        );
+
+        Ok(())
+    }
     async fn process_derivative_markets(
         &self,
         markets: Vec<FullDerivativeMarket>,
         block_height: u64,
     ) -> Result<(), Box<dyn Error + Send + Sync>> {
-        // Convert to Kafka message format
-        let messages = markets
-            .into_iter()
-            .map(|market| {
-                crate::models::KafkaMessage {
-                    message_type: crate::models::MessageType::DerivativeMarket,
-                    block_height: block_height, // Now using actual block height
+        if markets.is_empty() {
+            return Ok(());
+        }
+        let length = markets.len();
 
-                    block_time: chrono::Utc::now().timestamp_millis() as u64,
-                    payload: crate::models::KafkaPayload::DerivativeMarkets(vec![
-                        self.convert_derivative_market(market)
-                    ]),
-                }
-            })
-            .collect::<Vec<_>>();
+        // Convert all markets to payloads
+        let market_payloads = markets
+            .into_iter()
+            .map(|market| self.convert_derivative_market(market))
+            .collect();
+
+        // Create a single message containing all markets
+        let message = crate::models::KafkaMessage {
+            message_type: crate::models::MessageType::DerivativeMarket,
+            block_height: block_height,
+            block_time: chrono::Utc::now().timestamp_millis() as u64,
+            payload: crate::models::KafkaPayload::DerivativeMarkets(market_payloads),
+        };
 
         // Send to Kafka
-        if !messages.is_empty() {
-            let results = self.producer.send_batch(messages).await;
-            let success_count = results.iter().filter(|r| r.is_ok()).count();
-            info!(
-                "Sent {}/{} derivative markets to Kafka at block height {}",
-                success_count,
-                results.len(),
-                block_height
-            );
-        }
+        let results = self.producer.send_batch_current_only(vec![message]).await;
+        let success = results.first().map_or(false, |r| r.is_ok());
+        info!(
+            "Sent {} derivative markets to Kafka as single batch at block height {}",
+            length, block_height
+        );
 
         Ok(())
     }
@@ -290,31 +363,32 @@ impl ExchangeHeartbeat {
         positions: Vec<DerivativePosition>,
         block_height: u64,
     ) -> Result<(), Box<dyn Error + Send + Sync>> {
-        // Convert to Kafka message format
-        let messages = positions
-            .into_iter()
-            .map(|position| crate::models::KafkaMessage {
-                message_type: crate::models::MessageType::ExchangePosition,
-                block_height: block_height,
-
-                block_time: chrono::Utc::now().timestamp_millis() as u64,
-                payload: crate::models::KafkaPayload::ExchangePositions(vec![
-                    self.convert_position(position)
-                ]),
-            })
-            .collect::<Vec<_>>();
-
-        // Send to Kafka
-        if !messages.is_empty() {
-            let results = self.producer.send_batch(messages).await;
-            let success_count = results.iter().filter(|r| r.is_ok()).count();
-            info!(
-                "Sent {}/{} positions to Kafka at block height {}",
-                success_count,
-                results.len(),
-                block_height
-            );
+        if positions.is_empty() {
+            return Ok(());
         }
+        let length = positions.len();
+        // Convert all positions into a single payload
+        let position_payloads = positions
+            .into_iter()
+            .map(|position| self.convert_position(position))
+            .collect();
+
+        // Create just one message containing all positions
+        let message = crate::models::KafkaMessage {
+            message_type: crate::models::MessageType::ExchangePosition,
+            block_height: block_height,
+            block_time: chrono::Utc::now().timestamp_millis() as u64,
+            payload: crate::models::KafkaPayload::ExchangePositions(position_payloads),
+        };
+
+        // Send single message with all positions
+        let results = self.producer.send_batch_current_only(vec![message]).await;
+        let success = results.first().map_or(false, |r| r.is_ok());
+
+        info!(
+            "Sent {} positions to Kafka as single batch at block height {}",
+            length, block_height
+        );
 
         Ok(())
     }
@@ -324,35 +398,35 @@ impl ExchangeHeartbeat {
         balances: Vec<crate::proto::injective::exchange::v1beta1::Balance>,
         block_height: u64,
     ) -> Result<(), Box<dyn Error + Send + Sync>> {
-        // Convert to Kafka message format
-        let messages = balances
-            .into_iter()
-            .map(|balance| crate::models::KafkaMessage {
-                message_type: crate::models::MessageType::ExchangeBalance,
-                block_height: block_height,
-
-                block_time: chrono::Utc::now().timestamp_millis() as u64,
-                payload: crate::models::KafkaPayload::ExchangeBalances(vec![
-                    self.convert_exchange_balance(balance)
-                ]),
-            })
-            .collect::<Vec<_>>();
-
-        // Send to Kafka
-        if !messages.is_empty() {
-            let results = self.producer.send_batch(messages).await;
-            let success_count = results.iter().filter(|r| r.is_ok()).count();
-            info!(
-                "Sent {}/{} exchange balances to Kafka at block height {}",
-                success_count,
-                results.len(),
-                block_height
-            );
+        if balances.is_empty() {
+            return Ok(());
         }
+        let length = balances.len();
+        // Convert all balances into a single payload
+        let balance_payloads = balances
+            .into_iter()
+            .map(|balance| self.convert_exchange_balance(balance))
+            .collect();
+
+        // Create one message containing all balances
+        let message = crate::models::KafkaMessage {
+            message_type: crate::models::MessageType::ExchangeBalance,
+            block_height: block_height,
+            block_time: chrono::Utc::now().timestamp_millis() as u64,
+            payload: crate::models::KafkaPayload::ExchangeBalances(balance_payloads),
+        };
+
+        // Send the single message
+        let results = self.producer.send_batch_current_only(vec![message]).await;
+        let success = results.first().map_or(false, |r| r.is_ok());
+
+        info!(
+            "Sent {} exchange balances to Kafka as single batch at block height {}",
+            length, block_height
+        );
 
         Ok(())
     }
-
     async fn process_derivative_orderbook(
         &self,
         market_id: &str,
@@ -383,7 +457,7 @@ impl ExchangeHeartbeat {
         };
 
         // Send to Kafka
-        let results = self.producer.send_batch(vec![message]).await;
+        let results = self.producer.send_batch_current_only(vec![message]).await;
         if let Some(Err(e)) = results.first() {
             error!("Failed to send orderbook to Kafka: {}", e);
         } else {
