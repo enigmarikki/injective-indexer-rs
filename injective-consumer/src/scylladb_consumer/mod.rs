@@ -2,9 +2,10 @@ use crate::compute::{calculate_liquidation_price, is_liquidatable};
 use crate::consumer::MessageProcessor;
 use crate::models::{KafkaMessage, KafkaPayload};
 use async_trait::async_trait;
-use chrono::{LocalResult, TimeZone, Utc};
+use chrono::{DateTime, LocalResult, TimeZone, Utc};
 use log::{error, info, warn};
 use scylla::{Session, SessionBuilder};
+use scylla::frame::value::CqlTimestamp;
 use std::error::Error;
 use std::sync::Arc;
 
@@ -66,6 +67,26 @@ impl ScyllaDBProcessor {
             )
             .await?;
 
+        // New market-optimized table for efficient queries by market_id
+        session
+            .query_unpaged(
+                "CREATE TABLE IF NOT EXISTS injective.market_positions (
+                market_id text,
+                subaccount_id text,
+                block_height bigint,
+                timestamp timestamp,
+                is_long boolean,
+                quantity text,
+                entry_price text,
+                margin text,
+                cumulative_funding_entry text,
+                liquidation_price text,
+                PRIMARY KEY (market_id, subaccount_id, block_height)
+            ) WITH CLUSTERING ORDER BY (subaccount_id ASC, block_height DESC)",
+                &[],
+            )
+            .await?;
+
         session
             .query_unpaged(
                 "CREATE TABLE IF NOT EXISTS injective.liquidatable_positions (
@@ -110,11 +131,12 @@ impl ScyllaDBProcessor {
             return Ok(());
         }
 
-        // Use timestamp_opt to avoid deprecation.
-        let datetime_millis = match Utc.timestamp_opt(timestamp, 0) {
-            LocalResult::Single(dt) => dt.timestamp_millis(),
-            _ => 0,
+        // Convert timestamp to CqlTimestamp
+        let datetime: DateTime<Utc> = match Utc.timestamp_opt(timestamp, 0) {
+            LocalResult::Single(dt) => dt,
+            _ => Utc::now(), // Fallback to current time if invalid timestamp
         };
+        let cql_timestamp = CqlTimestamp(datetime.timestamp_millis());
 
         // Store the scaled values as strings
         let market_query = "INSERT INTO injective.markets (
@@ -127,7 +149,7 @@ impl ScyllaDBProcessor {
                 (
                     &market.market_id,
                     block_height,
-                    datetime_millis,
+                    cql_timestamp,
                     &market.ticker,
                     mark_price.to_string(), // Store scaled value
                     &market.maintenance_margin_ratio,
@@ -140,11 +162,11 @@ impl ScyllaDBProcessor {
                 e
             })?;
 
-        // Fetch positions for this market.
+        // Fetch positions for this market from the market_positions table
         let positions_query = "SELECT subaccount_id, is_long, quantity, entry_price, margin, cumulative_funding_entry, block_height 
-            FROM injective.positions 
+            FROM injective.market_positions 
             WHERE market_id = ? 
-            PER PARTITION LIMIT 1";
+            LIMIT 1000";  // Set a reasonable limit
 
         let positions_result = self
             .session
@@ -202,14 +224,15 @@ impl ScyllaDBProcessor {
                 cumulative_funding_entry_val,
             );
 
-            let update_query = "UPDATE injective.positions 
+            // Update both position tables with the new liquidation price
+            let update_positions_query = "UPDATE injective.positions 
                 SET liquidation_price = ? 
                 WHERE market_id = ? AND subaccount_id = ? AND block_height = ?";
 
             if let Err(e) = self
                 .session
                 .query_unpaged(
-                    update_query,
+                    update_positions_query,
                     (
                         liquidation_price.to_string(),
                         &market.market_id,
@@ -219,7 +242,28 @@ impl ScyllaDBProcessor {
                 )
                 .await
             {
-                error!("Failed to update liquidation price: {}", e);
+                error!("Failed to update liquidation price in positions table: {}", e);
+                // Continue with other updates even if this one fails
+            }
+
+            let update_market_positions_query = "UPDATE injective.market_positions 
+                SET liquidation_price = ? 
+                WHERE market_id = ? AND subaccount_id = ? AND block_height = ?";
+
+            if let Err(e) = self
+                .session
+                .query_unpaged(
+                    update_market_positions_query,
+                    (
+                        liquidation_price.to_string(),
+                        &market.market_id,
+                        &subaccount_id,
+                        pos_block_height,
+                    ),
+                )
+                .await
+            {
+                error!("Failed to update liquidation price in market_positions table: {}", e);
                 continue;
             }
 
@@ -239,7 +283,7 @@ impl ScyllaDBProcessor {
                             &market.market_id,
                             &subaccount_id,
                             pos_block_height,
-                            datetime_millis,
+                            cql_timestamp,
                             is_long,
                             quantity,
                             entry_price,
@@ -343,11 +387,14 @@ impl ScyllaDBProcessor {
             cumulative_funding_entry,
         );
 
-        let datetime_millis = match Utc.timestamp_opt(timestamp as i64, 0) {
-            LocalResult::Single(dt) => dt.timestamp_millis(),
-            _ => 0,
+        // Convert timestamp to CqlTimestamp
+        let datetime: DateTime<Utc> = match Utc.timestamp_opt(timestamp, 0) {
+            LocalResult::Single(dt) => dt,
+            _ => Utc::now(), // Fallback to current time if invalid timestamp
         };
+        let cql_timestamp = CqlTimestamp(datetime.timestamp_millis());
 
+        // Insert into the original positions table
         let position_query = "INSERT INTO injective.positions (
             market_id, subaccount_id, block_height, timestamp, is_long, quantity, 
             entry_price, margin, cumulative_funding_entry, liquidation_price
@@ -360,7 +407,7 @@ impl ScyllaDBProcessor {
                     &position.market_id,
                     &position.subaccount_id,
                     block_height,
-                    datetime_millis,
+                    cql_timestamp,
                     is_long,
                     quantity.to_string(),                 // Store scaled value
                     entry_price.to_string(),              // Store scaled value
@@ -372,6 +419,34 @@ impl ScyllaDBProcessor {
             .await
             .map_err(|e| {
                 error!("Failed to insert position: {}", e);
+                e
+            })?;
+
+        // Also insert into the market-optimized positions table
+        let market_position_query = "INSERT INTO injective.market_positions (
+            market_id, subaccount_id, block_height, timestamp, is_long, quantity, 
+            entry_price, margin, cumulative_funding_entry, liquidation_price
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
+
+        self.session
+            .query_unpaged(
+                market_position_query,
+                (
+                    &position.market_id,
+                    &position.subaccount_id,
+                    block_height,
+                    cql_timestamp,
+                    is_long,
+                    quantity.to_string(),                 // Store scaled value
+                    entry_price.to_string(),              // Store scaled value
+                    margin.to_string(),                   // Store scaled value
+                    cumulative_funding_entry.to_string(), // Store scaled value
+                    liquidation_price.to_string(),
+                ),
+            )
+            .await
+            .map_err(|e| {
+                error!("Failed to insert market position: {}", e);
                 e
             })?;
 
@@ -392,7 +467,7 @@ impl ScyllaDBProcessor {
                         &position.market_id,
                         &position.subaccount_id,
                         block_height,
-                        datetime_millis,
+                        cql_timestamp,
                         is_long,
                         quantity.to_string(),    // Store scaled value
                         entry_price.to_string(), // Store scaled value

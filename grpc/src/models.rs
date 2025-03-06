@@ -1,8 +1,8 @@
 use serde::{Deserialize, Serialize};
 // Re-export proto generated types for ease of use
 pub use crate::proto::injective::stream::v1beta1::{
-    BankBalancesFilter, OraclePriceFilter, OrderbookFilter, OrdersFilter, PositionsFilter,
-    StreamRequest, StreamResponse, SubaccountDepositsFilter, TradesFilter,
+    OraclePriceFilter, OrderbookFilter,
+    StreamRequest, StreamResponse, TradesFilter,
 };
 
 /// Wrapper types for Kafka messages
@@ -251,7 +251,7 @@ impl From<crate::proto::injective::stream::v1beta1::StreamResponse> for Vec<Kafk
             messages.push(KafkaMessage {
                 message_type: MessageType::StreamBankBalance,
                 block_height,
-                block_time: block_time,
+                block_time,
                 payload: KafkaPayload::StreamBankBalances(bank_balances),
             });
         }
@@ -283,7 +283,7 @@ impl From<crate::proto::injective::stream::v1beta1::StreamResponse> for Vec<Kafk
             messages.push(KafkaMessage {
                 message_type: MessageType::StreamSubaccountDeposit,
                 block_height,
-                block_time: block_time,
+                block_time,
                 payload: KafkaPayload::StreamSubaccountDeposits(subaccount_deposits),
             });
         }
@@ -311,7 +311,7 @@ impl From<crate::proto::injective::stream::v1beta1::StreamResponse> for Vec<Kafk
             messages.push(KafkaMessage {
                 message_type: MessageType::SpotTrade,
                 block_height,
-                block_time: block_time,
+                block_time,
                 payload: KafkaPayload::SpotTrades(spot_trades),
             });
         }
@@ -353,7 +353,7 @@ impl From<crate::proto::injective::stream::v1beta1::StreamResponse> for Vec<Kafk
             messages.push(KafkaMessage {
                 message_type: MessageType::DerivativeTrade,
                 block_height,
-                block_time: block_time,
+                block_time,
                 payload: KafkaPayload::DerivativeTrades(derivative_trades),
             });
         }
@@ -437,7 +437,7 @@ impl From<crate::proto::injective::stream::v1beta1::StreamResponse> for Vec<Kafk
             messages.push(KafkaMessage {
                 message_type: MessageType::SpotOrder,
                 block_height,
-                block_time: block_time,
+                block_time,
 
                 payload: KafkaPayload::SpotOrders(spot_orders),
             });
@@ -510,7 +510,7 @@ impl From<crate::proto::injective::stream::v1beta1::StreamResponse> for Vec<Kafk
             messages.push(KafkaMessage {
                 message_type: MessageType::DerivativeOrder,
                 block_height,
-                block_time: block_time,
+                block_time,
 
                 payload: KafkaPayload::DerivativeOrders(derivative_orders),
             });
@@ -551,7 +551,7 @@ impl From<crate::proto::injective::stream::v1beta1::StreamResponse> for Vec<Kafk
             messages.push(KafkaMessage {
                 message_type: MessageType::StreamSpotOrderbook,
                 block_height,
-                block_time: block_time,
+                block_time,
 
                 payload: KafkaPayload::StreamSpotOrderbooks(spot_orderbooks),
             });
@@ -592,7 +592,7 @@ impl From<crate::proto::injective::stream::v1beta1::StreamResponse> for Vec<Kafk
             messages.push(KafkaMessage {
                 message_type: MessageType::StreamDerivativeOrderbook,
                 block_height,
-                block_time: block_time,
+                block_time,
 
                 payload: KafkaPayload::StreamDerivativeOrderbooks(derivative_orderbooks),
             });
@@ -617,7 +617,7 @@ impl From<crate::proto::injective::stream::v1beta1::StreamResponse> for Vec<Kafk
             messages.push(KafkaMessage {
                 message_type: MessageType::StreamPosition,
                 block_height,
-                block_time: block_time,
+                block_time,
 
                 payload: KafkaPayload::StreamPositions(positions),
             });
@@ -638,7 +638,7 @@ impl From<crate::proto::injective::stream::v1beta1::StreamResponse> for Vec<Kafk
             messages.push(KafkaMessage {
                 message_type: MessageType::StreamOraclePrice,
                 block_height,
-                block_time: block_time,
+                block_time,
 
                 payload: KafkaPayload::StreamOraclePrices(oracle_prices),
             });

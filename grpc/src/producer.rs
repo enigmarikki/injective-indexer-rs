@@ -1,7 +1,7 @@
 use crate::config::KafkaConfig;
-use crate::models::{KafkaMessage, MessageType};
+use crate::models::KafkaMessage;
 use futures::future::join_all;
-use log::{debug, error, info};
+use log::error;
 use rdkafka::config::ClientConfig;
 use rdkafka::error::KafkaError;
 use rdkafka::producer::{FutureProducer, FutureRecord, Producer};
@@ -21,7 +21,7 @@ pub struct BatchKafkaProducer {
 impl BatchKafkaProducer {
     pub fn new(config: &KafkaConfig) -> Result<Self, KafkaError> {
         let producer = ClientConfig::new()
-            .set("bootstrap.servers", &config.brokers.join(","))
+            .set("bootstrap.servers", config.brokers.join(","))
             .set("client.id", &config.client_id)
             // Ultra-low latency optimizations
             .set("compression.type", "lz4") // Faster than snappy

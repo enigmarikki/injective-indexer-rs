@@ -17,8 +17,6 @@ use config::Config;
 use models::{build_stream_request, StreamRequest, StreamResponse};
 use producer::BatchKafkaProducer;
 use proto::injective::stream::v1beta1::stream_client::StreamClient;
-use query_client::ExchangeHeartbeat;
-use query_profiler::create_profiled_exchange_heartbeat;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {

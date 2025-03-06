@@ -69,7 +69,7 @@ impl ExchangeQueryClient {
         // Use the async HTTP client properly
         let response = self
             .http_client
-            .get(&format!("{}/status", self.tendermint_rpc_endpoint))
+            .get(format!("{}/status", self.tendermint_rpc_endpoint))
             .send()
             .await?
             .json::<StatusResponse>()
@@ -345,7 +345,7 @@ impl ExchangeHeartbeat {
         // Create a single message containing all markets
         let message = crate::models::KafkaMessage {
             message_type: crate::models::MessageType::DerivativeMarket,
-            block_height: block_height,
+            block_height,
             block_time: chrono::Utc::now().timestamp_millis() as u64,
             payload: crate::models::KafkaPayload::DerivativeMarkets(market_payloads),
         };
@@ -379,7 +379,7 @@ impl ExchangeHeartbeat {
         // Create just one message containing all positions
         let message = crate::models::KafkaMessage {
             message_type: crate::models::MessageType::ExchangePosition,
-            block_height: block_height,
+            block_height,
             block_time: chrono::Utc::now().timestamp_millis() as u64,
             payload: crate::models::KafkaPayload::ExchangePositions(position_payloads),
         };
@@ -414,7 +414,7 @@ impl ExchangeHeartbeat {
         // Create one message containing all balances
         let message = crate::models::KafkaMessage {
             message_type: crate::models::MessageType::ExchangeBalance,
-            block_height: block_height,
+            block_height,
             block_time: chrono::Utc::now().timestamp_millis() as u64,
             payload: crate::models::KafkaPayload::ExchangeBalances(balance_payloads),
         };
@@ -439,7 +439,7 @@ impl ExchangeHeartbeat {
         // Convert to Kafka message format
         let message = crate::models::KafkaMessage {
             message_type: crate::models::MessageType::DerivativeFullOrderbook,
-            block_height: block_height,
+            block_height,
             block_time: chrono::Utc::now().timestamp_millis() as u64,
             payload: crate::models::KafkaPayload::DerivativeFullOrderbooks(vec![
                 crate::models::FullLimitOrderbookPayload {
