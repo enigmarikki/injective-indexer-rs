@@ -323,16 +323,17 @@ impl RedisProcessor {
                 "mark_price": mark_price.to_string(),
                 "is_liquidatable": is_liquidatable,
                 "block_height": block_height.to_string(),
-                "timestamp": timestamp.to_string(),
+                "market_id": position.market_id,
+                "subaccount_id": position.subaccount_id
             });
 
             // Create position update event
             let position_event = StreamEvent {
                 event_type: EventType::PositionUpdate,
                 timestamp,
-                payload: serde_json::json!({
-                    "data": position_data.clone()
-                }),
+                payload: serde_json::json!(
+                    position_data.clone()
+                ),
             };
 
             let pubsub_clone = pubsub.clone();

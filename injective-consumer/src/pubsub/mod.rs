@@ -347,9 +347,7 @@ impl RedisPubSubService {
         StreamEvent {
             event_type: EventType::MarketUpdate,
             timestamp: chrono::Utc::now().timestamp_millis() as u64,
-            payload: serde_json::json!({
-                "data": data
-            }),
+            payload: serde_json::json!(data),
         }
     }
 
@@ -368,9 +366,9 @@ impl RedisPubSubService {
         StreamEvent {
             event_type: EventType::LiquidationAlert,
             timestamp: chrono::Utc::now().timestamp_millis() as u64,
-            payload: serde_json::json!({
-                "data": data
-            }),
+            payload: serde_json::json!(
+                 data
+            ),
         }
     }
 }
