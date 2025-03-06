@@ -51,8 +51,12 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
 
     // Start the heartbeat service in a separate task
     let heartbeat_handle = task::spawn(async move {
-        match query_profiler::create_profiled_exchange_heartbeat(&heartbeat_config.grpc, heartbeat_producer, 200)
-            .await
+        match query_profiler::create_profiled_exchange_heartbeat(
+            &heartbeat_config.grpc,
+            heartbeat_producer,
+            200,
+        )
+        .await
         {
             Ok(mut heartbeat) => {
                 info!("Starting profiled heartbeat service");

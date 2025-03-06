@@ -21,24 +21,27 @@ impl ExchangeQueryClient {
         // Set larger message size limit through environment variables
         // These need to be set before creating the client
         std::env::set_var("GRPC_ARG_MAX_RECEIVE_MESSAGE_LENGTH", "67108864"); // 64MB
-        std::env::set_var("GRPC_ARG_MAX_SEND_MESSAGE_LENGTH", "16777216");    // 16MB
-        
+        std::env::set_var("GRPC_ARG_MAX_SEND_MESSAGE_LENGTH", "16777216"); // 16MB
+
         // Create normal client without interceptor
         let client = QueryClient::connect(config.query_endpoint.clone()).await?;
-        
-        info!("Connected to exchange query service: {}", config.query_endpoint);
-    
+
+        info!(
+            "Connected to exchange query service: {}",
+            config.query_endpoint
+        );
+
         // Rest of your connect method...
         let http_client = reqwest::Client::builder()
             .timeout(Duration::from_secs(10))
             .build()?;
-    
+
         // Derive Tendermint RPC endpoint from query endpoint
         let parsed_url = url::Url::parse(&config.query_endpoint)?;
         let host = parsed_url.host_str().unwrap_or("localhost");
         let tendermint_rpc_endpoint = format!("http://{}:26657", host);
         debug!("Using Tendermint RPC endpoint: {}", tendermint_rpc_endpoint);
-    
+
         Ok(Self {
             client,
             http_client,
