@@ -16,7 +16,14 @@ services:
       - KAFKA_BROKERS=kafka:9092
       - KAFKA_TOPIC=injective-data
       - KAFKA_CLIENT_ID=injective-client
-    # (Optional) Expose ports if needed
+    volumes:
+      - ./logs/grpc-client:/logs
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "5m"
+        max-file: "2"
+        compress: "true"
     networks:
       - app-network
     extra_hosts:
@@ -25,12 +32,16 @@ services:
   # Zookeeper service
   zookeeper:
     image: confluentinc/cp-zookeeper:latest
+    user: "0:0"  # Run as root to avoid permission issues
     environment:
       ZOOKEEPER_CLIENT_PORT: 2181
       ZOOKEEPER_TICK_TIME: 2000
+      ZOOKEEPER_LOG4J_ROOT_LOGLEVEL: WARN
     volumes:
       - ./zookeeper-data:/var/lib/zookeeper/data
-      - ./zookeeper-logs:/var/lib/zookeeper/log
+      - ./logs/zookeeper:/logs
+    logging:
+      driver: "none"  # Disable logging completely
     healthcheck:
       test: ["CMD-SHELL", "echo stat | nc localhost 2181"]
       interval: 10s
@@ -49,6 +60,7 @@ services:
       - "9092:9092"
     volumes:
       - ./kafka-data:/var/lib/kafka/data
+      - ./logs/kafka:/logs
     environment:
       KAFKA_BROKER_ID: 1
       KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
@@ -56,6 +68,18 @@ services:
       KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092
       KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
       KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+      # Add log reduction settings
+      KAFKA_LOG_RETENTION_HOURS: 1
+      KAFKA_LOG_RETENTION_BYTES: 10000000  # 10MB
+      KAFKA_LOG_SEGMENT_BYTES: 5000000     # 5MB
+      KAFKA_LOG4J_ROOT_LOGLEVEL: WARN
+      KAFKA_TOOLS_LOG4J_LOGLEVEL: ERROR
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "5m"
+        max-file: "2"
+        compress: "true"
     healthcheck:
       test: ["CMD-SHELL", "kafka-topics --bootstrap-server localhost:9092 --list"]
       interval: 10s
@@ -75,6 +99,9 @@ services:
       - KAFKA_CLUSTERS_0_NAME=injective-cluster
       - KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS=kafka:9092
       - KAFKA_CLUSTERS_0_ZOOKEEPER=zookeeper:2181
+      - LOG_LEVEL=WARN
+    logging:
+      driver: "none"  # Disable logging completely
     depends_on:
       kafka:
         condition: service_healthy
@@ -89,11 +116,16 @@ services:
       memlock: -1
     ports:
       - "6381:6379"
-    # Use a bind mount to persist data locally
     volumes:
       - ./dragonfly-data:/data
-    # Removed password requirement here
-    command: ''
+      - ./logs/dragonflydb:/logs
+    command: '--logtostderr=false --alsologtostderr=false --minloglevel=1'
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "5m"
+        max-file: "2"
+        compress: "true"
     networks:
       - app-network
     restart: unless-stopped
@@ -107,12 +139,21 @@ services:
   scylladb:
     image: scylladb/scylla:5.2
     container_name: scylladb
+    user: "0:0"  # Run as root to avoid permission issues
     ports:
       - "9042:9042"
-    # Use a bind mount to persist data locally
     volumes:
       - ./scylla-data:/var/lib/scylla
-    command: --smp 1 --memory 1G --overprovisioned 1 --developer-mode 1 --api-address 0.0.0.0
+      - ./logs/scylladb:/logs
+    # Removed the invalid logger options
+    command: >
+      --smp 1 --memory 1G --overprovisioned 1 --developer-mode 1 --api-address 0.0.0.0
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "5m"
+        max-file: "2"
+        compress: "true"
     networks:
       - app-network
     restart: unless-stopped
@@ -132,6 +173,8 @@ services:
         condition: service_healthy
     volumes:
       - ./scripts/init-scylladb.sh:/init-scylladb.sh
+    logging:
+      driver: "none"  # Disable logging completely
     entrypoint: ["/bin/bash", "/init-scylladb.sh"]
     networks:
       - app-network
@@ -152,7 +195,7 @@ services:
       grpc-client:
         condition: service_started
     environment:
-      - RUST_LOG=info
+      - RUST_LOG=warn  # Reduced logging level
       - CONFIG_FILE=/app/config/config.json
       - KAFKA_BROKERS=kafka:9092
       - KAFKA_TOPIC=injective-data
@@ -165,7 +208,13 @@ services:
       - GRPC_QUERY_ENDPOINT=http://host.docker.internal:9900
     volumes:
       - ./config:/app/config
-      - ./injective-logs:/app/logs
+      - ./logs/injective-consumer:/app/logs
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "5m"
+        max-file: "2"
+        compress: "true"
     networks:
       - app-network
     restart: unless-stopped
